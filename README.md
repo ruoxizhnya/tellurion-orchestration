@@ -1,6 +1,6 @@
 # tellurion-orchestration
 
-> module: `tellurion-orchestration` ｜ 状态：**预留（S0 占位，触发式启动）——尚未启动，无实现；`cmd/dualrun` 归属未裁决**
+> module: `tellurion-orchestration` ｜ 状态：**预留（S0 占位，触发式启动）——尚未启动，无实现**（`cmd/dualrun` 已裁决留 core，不在本仓）
 
 编排 / worker 服务：job / batch / walkforward 的算力出口，schema `run`。把"批量扫"从 core 进程里搬出来。
 

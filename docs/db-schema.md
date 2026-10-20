@@ -66,4 +66,4 @@ verified-by: 功能边界固化（三份契约：db / api / dataflow）
 
 ## 5. 待定
 
-- `cmd/dualrun`（K15 双跑）归本仓还是 core **未裁决**；在裁决前不搬。
+- `cmd/dualrun`（K15 双跑）**已裁决留 core**（2026-10-20）：它的产物（成交明细与对齐报告）不落 `run` schema，本仓不承接它的状态与结果。

@@ -6,9 +6,11 @@
 
 编排 / worker 服务：job / batch / walkforward 的算力出口，schema `run`。把"批量扫"从 core 进程里搬出来。
 
-**状态**：预留（S0 占位，触发式启动）——尚未启动，无实现；`cmd/dualrun` 归属未裁决
+**状态**：预留（S0 占位，触发式启动）——尚未启动，无实现
 
-**今天的实现**：`core:pkg/backtest/batch` + `core:pkg/backtest/walkforward` + `backtest_jobs` / `walk_forward_reports` 表；`cmd/dualrun` 归属见 [repo-inventory U1](https://github.com/ruoxizhnya/tellurion/blob/main/docs/design/qt-decoupling/repo-inventory.md)。
+**今天的实现**：`core:pkg/backtest/batch` + `core:pkg/backtest/walkforward` + `backtest_jobs` / `walk_forward_reports` 表。
+
+**不搬的**：`cmd/dualrun`（K15 双跑）**已裁决留 core**——它要同进程链接两个内核，且是引擎的验收门，不是本仓的 job。见 core [repo-inventory §3](https://github.com/ruoxizhnya/tellurion/blob/main/docs/design/qt-decoupling/repo-inventory.md)。
 
 ## 2. 构建 / 测试（必须单仓可跑）
 
