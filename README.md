@@ -1,40 +1,40 @@
 # tellurion-orchestration
 
-> module: `tellurion-orchestration` ｜ 状态：**预留（触发式）**——当前为占位仓，**未启动**，且 `cmd/dualrun` 归属未裁决。
+> module: `tellurion-orchestration` ｜ 状态：**预留（S0 占位，触发式启动）——尚未启动，无实现；`cmd/dualrun` 归属未裁决**
 
-编排与 worker：批量回测（`batch`）、walk-forward（`walkforward`）、任务队列与调度。
+编排 / worker 服务：job / batch / walkforward 的算力出口，schema `run`。把"批量扫"从 core 进程里搬出来。
 
-⚠️ `cmd/dualrun`（K15 双内核对拍）**归属未定**：它必须能同时链接 Go 与 NT 两个内核，既像编排能力，又更像必须留在 core 的东西。**评估 X5 之前必须先回答它归谁**，否则双跑会在拆分中失去运行位置。
+## 目录
+
+| 路径 | 内容 |
+|---|---|
+| `docs/` | 本仓文档：台账 / 边界 / 决策 / 归档 —— 从这里进：`docs/README.md` |
+| `AGENTS.md` | 本仓入口（构建、边界、禁止、依赖版本） |
+| `doc.go` | 占位包（无实现） |
+
+## 快速开始
+
+```bash
+go build ./...
+go vet ./...
+go test ./...
+```
+
+本仓**单独 checkout 就能跑通**上面三条。需要别的仓源码才过 → 边界错了，不是加 `replace` 能解决的问题。
 
 ## 边界
 
-**可以**
-- 编排多个回测 run、管理 worker 池与队列
-- 持有 `run` schema 的编排侧表（run 元数据、任务状态）
+**可以**：job / batch / walkforward 的编排与重试；持有 `run` schema 的 job 元数据；按算力配额分片调度
 
-**不可以**
-- 自己实现回测（必须调 core 的 `EngineRunner`）
-- 承载 per-bar 逻辑
+**不可以**：在编排层做业务裁决（它只负责"把活派下去"）；import core 的实现包；持有回测结果真相（结果归 core 的 state store）
 
-## 依赖方向
+## 文档
 
-```
-tellurion-orchestration
-```
+- 文档导航：`docs/README.md`
+- 本仓台账：`docs/TASKS.md`（唯一；跨仓任务只留指针）
+- 边界与依赖方向：`docs/ARCHITECTURE.md`
+- 决策记录：`docs/adr/`
 
-- 契约与工具一律以 **tag** 依赖（`github.com/ruoxizhnya/tellurion-contracts` / `-kit`），
-  **禁止 `replace` 指向仓外路径**（单仓不可构建）。
-- `go.work` 一律不入库。
+## 许可
 
-## 施工入口
-
-本仓所有任务登记在 **`tellurion` 仓的 `docs/TASKS.md`**（单一台账，避免双写）。
-在台账出现本仓的单号之前，**不要在此写实现**。
-
-## 权威文档
-
-| 主题 | 位置 |
-|---|---|
-| 仓清单与命名 | `tellurion:docs/design/qt-decoupling/repo-inventory.md` |
-| 分仓拓扑与阶梯 | `tellurion:docs/design/qt-decoupling/repo-topology-and-naming.md` |
-| P0 修复基线 | `tellurion:docs/design/qt-decoupling/p0-round2-review.md` |
+MIT（见 `LICENSE`）。

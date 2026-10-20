@@ -1,0 +1,20 @@
+# 构建产物
+/bin/
+*.exe
+*.test
+*.out
+coverage.out
+
+# go.work 是开发机产物（ADR-D31）：多仓联调时才建，不入库。
+# 提交它 = 让依赖解析依赖"别人磁盘上的目录"，CI 与别人机器上行为不一致。
+go.work
+go.work.sum
+
+# 本地环境
+.env
+.env.local
+
+# 编辑器 / 系统
+.idea/
+.DS_Store
+Thumbs.db

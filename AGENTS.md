@@ -1,12 +1,14 @@
 # AGENTS — tellurion-orchestration
 
-## 这是什么仓
+> 本文件是**本仓**的唯一入口。判据：一个 agent 只 checkout 本仓，就能知道「怎么构建、边界在哪、依赖哪版契约、活在哪、禁止什么」，**不需要读别的仓的源码**。
 
-编排与 worker：批量回测（`batch`）、walk-forward（`walkforward`）、任务队列与调度。
+## 1. 这是什么仓
 
-状态：**预留（触发式）**——当前为占位仓，**未启动**，且 `cmd/dualrun` 归属未裁决。
+编排 / worker 服务：job / batch / walkforward 的算力出口，schema `run`。把"批量扫"从 core 进程里搬出来。
 
-## 构建 / 测试
+**状态**：预留（S0 占位，触发式启动）——尚未启动，无实现；`cmd/dualrun` 归属未裁决
+
+## 2. 构建 / 测试（必须单仓可跑）
 
 ```bash
 go build ./...
@@ -14,34 +16,43 @@ go vet ./...
 go test ./...
 ```
 
-本仓必须**单独 checkout 就能跑通**这三条（R1/R2）。若某一步需要别的仓的源码目录，
-那是**契约画错了**，不是正常状态——停下来先修边界，不要加 `replace ../xxx`。
+- 这三条是 R1/R2 的判据：**单独 checkout 就能绿**。
+- 若某一步需要别的仓的源码目录才过，那是**边界画错了**——停下来修边界，**不要**加 `replace ../xxx` 绕过。
+- 本机同时改多个仓时可用 `go.work` 联调，但**它不入库**（`.gitignore` 已挡）。
 
-## 边界（硬约束）
+## 3. 边界（硬约束）
 
-允许：
-- 编排多个回测 run、管理 worker 池与队列
-- 持有 `run` schema 的编排侧表（run 元数据、任务状态）
+**允许**
 
-禁止：
-- 自己实现回测（必须调 core 的 `EngineRunner`）
-- 承载 per-bar 逻辑
-- `replace` 指向仓外路径；`go.work*` 提交入库。
-- 引入未在本文件声明的第三方依赖（先改本文件，再改代码）。
+- job / batch / walkforward 的编排与重试
+- 持有 `run` schema 的 job 元数据
+- 按算力配额分片调度
 
-## 依赖的契约版本
+**禁止**
+
+- 在编排层做业务裁决（它只负责"把活派下去"）
+- import core 的实现包
+- 持有回测结果真相（结果归 core 的 state store）
+
+下面三条对所有仓都成立：
+
+- **禁止** `replace` 指向仓外路径（单仓就不可构建了）。
+- **禁止**提交 `go.work` / `go.work.sum`（本地产物；已在 `.gitignore`）。
+- 新增第三方依赖前，先在第 4 节登记，再改 `go.mod`；没登记就加依赖 = 绕过评审。
+
+## 4. 依赖的契约版本
 
 | 依赖 | 版本 | 说明 |
 |---|---|---|
-| `github.com/ruoxizhnya/tellurion-contracts` | 待定（S2 后 `v0.1.0`） | 契约变更只走 tag，不走源码路径 |
-| `github.com/ruoxizhnya/tellurion-kit` | 待定（S2 后 `v0.1.0`） | 同上 |
+| `github.com/ruoxizhnya/tellurion-contracts` | 待定（S2 后 `v0.1.0`） | `RunSpec` / `ResultSpec` 只认契约 |
+| `github.com/ruoxizhnya/tellurion-kit` | 待定（S2 后 `v0.1.0`） | 日志 / HTTP / DB 连接 |
 
-## 该做什么
+> 跨仓依赖**只认版本号**（伪版本或 tag），不认源码路径。契约变更走 `tellurion-contracts` 的发布，不走"顺手改一下"。
 
-**唯一台账是 `tellurion` 仓的 `docs/TASKS.md`。** 本仓没有独立 TASKS，
-跨仓只留指针、不镜像正文（避免双写漂移）。
+## 5. 活在哪、文档在哪
 
-开工前先读：
-1. `tellurion:docs/design/qt-decoupling/repo-inventory.md` —— 仓名与 module 规则
-2. `tellurion:docs/TASKS.md` —— 找本仓的单号；没有单号就别开工
-3. `tellurion:docs/design/qt-decoupling/p0-round2-review.md` §4 —— wave 顺序
+- **本仓台账**：`docs/TASKS.md`（唯一）。**没有单号别开工。**
+- 文档导航：`docs/README.md`；边界与依赖方向：`docs/ARCHITECTURE.md`；决策：`docs/adr/`。
+- 跨仓背景（只读，不在本仓改）：`tellurion:docs/design/qt-decoupling/repo-topology-and-naming.md`、`tellurion:docs/TASKS.md`。
+
+> 跨仓引用一律写 `repo:path` 纯文本，**不做可点击相对链接**——独立 checkout 时 `../../` 必断，R2 会永远红。
