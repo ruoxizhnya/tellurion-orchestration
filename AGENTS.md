@@ -8,6 +8,8 @@
 
 **状态**：预留（S0 占位，触发式启动）——尚未启动，无实现；`cmd/dualrun` 归属未裁决
 
+**今天的实现**：`core:pkg/backtest/batch` + `core:pkg/backtest/walkforward` + `backtest_jobs` / `walk_forward_reports` 表；`cmd/dualrun` 归属见 [repo-inventory U1](https://github.com/ruoxizhnya/tellurion/blob/main/docs/design/qt-decoupling/repo-inventory.md)。
+
 ## 2. 构建 / 测试（必须单仓可跑）
 
 ```bash
@@ -25,14 +27,14 @@ go test ./...
 **允许**
 
 - job / batch / walkforward 的编排与重试
-- 持有 `run` schema 的 job 元数据
+- 持有 `run` schema 的 job 元数据、状态检查点（`strategy_state`）与 artifact 指针
 - 按算力配额分片调度
 
 **禁止**
 
 - 在编排层做业务裁决（它只负责"把活派下去"）
 - import core 的实现包
-- 持有回测结果真相（结果归 core 的 state store）
+- 持有回测结果**内容**（结果归 core 的 state store；本仓只存指针 + 三 hash，见 `run_artifacts`）
 
 下面三条对所有仓都成立：
 
