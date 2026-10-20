@@ -4,7 +4,7 @@ last-verified: 2026-10-20
 verified-by: 功能边界固化（三份契约：db / api / dataflow）
 ---
 
-# 文档导航 — {name}
+# 文档导航 — tellurion-orchestration
 
 > 本目录只讲**本仓**。跨仓拓扑、阶梯与全局决策读 `tellurion:docs/`（见文末）。
 > 跨仓引用一律写成 `repo:path` 纯文本，**不做可点击相对链接**——独立 checkout 时 `../../` 必断。
