@@ -1,0 +1,5 @@
+# 换行符统一为 LF（与 core 仓 AUD-27 同一处置）。
+#
+# 本机 core.autocrlf=true 是系统级设置，会让 checkout 写出 CRLF，
+# 从而让 gofmt -l . 恒失败。本文件只约束 checkout 怎么写，不改任何 blob。
+* text=auto eol=lf
