@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-10-20
-verified-by: 首次建立本仓台账（QT-08 十二仓自治三件套）
+last-verified: 2026-10-21
+verified-by: 任务台账批量重分布（X 线单展开：QT-44 迁入）
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -15,17 +15,19 @@ verified-by: 首次建立本仓台账（QT-08 十二仓自治三件套）
 
 ## 一、本仓任务
 
-> 当前无本仓任务。**占位仓**：实现落地前不写业务代码。
->
-> 第一张单长什么样（照此写，别自造格式）：
->
-> ### XX-01 · <一句话目标> [P?] ⬜
-> - **① 目标**：…
-> - **② 上下文**：本仓路径/行号 + 冻结契约的路径与节号
-> - **③ 要求**：①②③（可执行、可核对）
-> - **④ 约束与非目标**：明确不做什么
-> - **⑤ 验收**：可复现的命令 + 期望输出；至少一条"破坏验证"（改坏它应当红）
-> - **⑥ 边界**：只做什么；相邻的什么归别的单
+> **约定变更（2026-10-21）**：原「占位仓不写正式六字段任务单」作废——X 线任务单已展开为本仓正式任务（见下）。M5/M8 开工前置不变；实现仍未开工，开工前仍须过前置两条。
+
+### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] ⬜
+
+> **迁入说明（2026-10-21）**：本单自 core 仓 `tellurion:docs/TASKS.md`「五、X 线」迁入（任务台账批量重分布：X 线单展开到各服务仓为正式六字段单，「占位仓不写正式任务单」旧约定同时作废）。六字段正文逐字保留、不改写；core 侧同号条目已改为指针。
+
+- **① 目标**：批量扫描的算力出口独立成服务；`backtest_jobs` / `strategy_state` 归属迁出内核；三 hash 落 `run_artifacts`。
+- **② 上下文**：`orchestration-service-design.md`（D22）+ BE-03；`BatchEngine` 已按 `contracts.EngineRunner` 注入，摘出成本低。
+- **③ 要求**：① `job`/`batch`/`walkforward` 从 `pkg/backtest` 上移；② worker 池调度 + 断点续跑协调；③ `run` schema（`backtest_jobs`/`walk_forward_reports`/`run_artifacts`/`strategy_state`）；④ `/api/runs/{id}/provenance` 端点；⑤ 内核通过 port 读写这些表。
+- **② 前置（U3，2026-10-20 审查补登记）**：`strategy_state` 迁 `run` 之前，core 必须先有 **`RunStateStore` port**（`Save(ctx, runID, state)` / `Load(ctx, runID)`），否则**内核失去状态持久化、X5 一动就编不过**。这个 port 以前谁都没登记，只在 `orchestration-service-design.md` 里被当成"内核走 port"一句带过。
+- **④ 约束与非目标**：不在内核保留编排逻辑；不改 `EngineRunner` 契约；不做 K8s；**不搬 `cmd/dualrun`**——它 2026-10-20 已裁决留 core（要同进程链接两个内核，且是引擎的验收门，见 `repo-inventory.md` §3）。
+- **⑤ 验收**：`pkg/backtest` 里 `job|batch|walkforward` 零命中；同一 batch 在编排服务与旧路径结果一致；provenance 端点返回三 hash。
+- **⑥ 边界**：只做编排与结果归属。
 
 
 ---
@@ -36,6 +38,7 @@ verified-by: 首次建立本仓台账（QT-08 十二仓自治三件套）
 
 > 这张表是**施工顺序**，不是任务台账：每条在执行前要展开成六字段单（目标/上下文/要求/约束/验收/边界），并写明冻结契约的路径与节号。
 > 顺序有依赖，**不要跳级**：跳序的代价是返工（例：X1a 的协议没冻结就写 aggregator，等于把协议写死在一个服务里）。
+> 2026-10-21：候选单已展开为「一、本仓任务」的正式六字段条目（表中「上游单号」指向的 QT 单正文现在就在本仓）。
 
 | 阶段 | 内容 | 上游单号 | 前置 |
 |---|---|---|---|
@@ -48,7 +51,7 @@ verified-by: 首次建立本仓台账（QT-08 十二仓自治三件套）
 
 | 单号 | 主题 | 在哪 |
 |---|---|---|
-| QT-44 | X5 编排 / worker 服务（job/batch/walkforward 上移） | `tellurion:docs/TASKS.md` |
+| QT-44 | X5 编排 / worker 服务（job/batch/walkforward 上移） | 已迁入本仓「一、本仓任务」（2026-10-21；core `tellurion:docs/TASKS.md` 留同号指针） |
 | QT-08 | 本仓 CI / AGENTS / 台账由该单一并补齐 | `tellurion:docs/TASKS.md` |
 
 ---
