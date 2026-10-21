@@ -29,7 +29,7 @@ go test ./...
 **允许**
 
 - job / batch / walkforward 的编排与重试
-- 持有 `run` schema 的 job 元数据、状态检查点（`strategy_state`）与 artifact 指针
+- 持有 `run` schema 的 job 元数据与 artifact 指针（~~状态检查点（`strategy_state`）~~ ⚠️ 2026-10-21 H5 裁决：`strategy_state` 归 strategy-runtime 模块、core 写 `quant.strategy_state`，不属本仓）
 - 按算力配额分片调度
 
 **禁止**

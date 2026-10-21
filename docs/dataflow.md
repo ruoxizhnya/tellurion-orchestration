@@ -12,15 +12,21 @@ verified-by: 功能边界固化（三份契约：db / api / dataflow）
 
 ```
 ui / agent / CI
-      │  POST /runs/jobs（幂等键）
+      │  POST /api/runs/jobs（幂等键）
       ↓
 tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash / worker）
       │  派活（port 或 HTTP，取决于部署形态）
       ↓
-   core 引擎（进程内）  ── 产出结果 ──►  run 结果坐标（三 hash）
+   内核路由（RunSpec.Kernel：空 = go；未注册 fail-closed，不回退）
+      ├─ go 内核：core 引擎（进程内 · 逐 bar）
+      └─ NT 侧车：NautilusTrader（独立进程，HTTP /v1/backtest）
+        ── 产出结果 ──►  run 结果坐标（三 hash）
       ↑
    worker 池（drain / 心跳）
 ```
+
+> **双内核**：派活按 `RunSpec.Kernel`（`BacktestRequest.Kernel`，空 = 默认 `go`，默认值不回填）经注册表路由——`go` 内核即 core 引擎（进程内逐 bar），NT 侧车是独立进程的 NautilusTrader 内核，派活走 HTTP `/v1/backtest`；未注册内核 fail-closed 拒绝，**不静默回退 go**。
+> 内核接口面见 `tellurion:docs/design/qt-decoupling/kernel-interface-map.md`，双内核模型见 `tellurion:docs/design/qt-decoupling/backtest-extraction.md`。
 
 ## 2. 关键时序
 
@@ -28,7 +34,7 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 2. worker 领取（乐观锁）→ `running`
 3. 引擎执行 → 结果 + 三 hash → `done` / `failed`
 4. `GET /api/runs/jobs/{id}` 查摘要；`GET /api/runs/{id}/provenance` 查坐标
-5. 滚动升级：`POST /workers/{id}/drain` → 跑完手上的 → 下线
+5. 滚动升级：`POST /api/runs/workers/{id}/drain` → 跑完手上的 → 下线
 
 ## 3. 失败模式（每一处 fail-closed 都要能指名）
 

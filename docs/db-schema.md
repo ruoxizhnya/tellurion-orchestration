@@ -6,7 +6,8 @@ verified-by: 功能边界固化（三份契约：db / api / dataflow）
 
 # DB Schema — tellurion-orchestration
 
-> **所有权声明**：本仓**拥有 `run` schema 的 DDL**：任务队列、批量批次、前向验证报告、三 hash 留痕、worker 注册、**运行状态检查点（`strategy_state`）**。是这组表的唯一写者。
+> **所有权声明**：本仓**拥有 `run` schema 的 DDL**：任务队列、批量批次、前向验证报告、三 hash 留痕、worker 注册。是这组表的唯一写者。
+> **运行状态检查点 `strategy_state` 归 strategy-runtime 模块（core 写 `quant.strategy_state`），不属本仓**（2026-10-21 裁决，指 `tellurion:docs/design/system-spec-review-2026-10-21.md` H5）。
 >
 > **`run` 是任务域，不是交易域**：里面**没有**订单 / 成交 / 持仓 / 资金——那些归 core 的 `quant`（实盘运行域）。
 > 判据：`run` 里的行描述"某个任务跑到哪了"，`quant` 里的行描述"钱和仓位发生了什么"。两边的写入时机、事务边界、审计要求都不同，混在一起就无法拆分。
@@ -20,14 +21,15 @@ verified-by: 功能边界固化（三份契约：db / api / dataflow）
 | `run.backtest_jobs` | 任务队列（queued→running→done/failed） | 从 core 的 `backtest_jobs`（无归属 schema）迁入 |
 | `run.walk_forward_reports` | 前向验证报告 | 从 core 迁入 |
 | `run.batch_runs` | 批量扫描批次 + 评分汇总 | 待建 |
-| `run.run_artifacts` | 每次 run 的三 hash（`strategy_ref` / `dataset_snapshot_hash` / `risk_rules_hash`）+ artifact 指针 | **待建（X0 载体）** |
+| `run.run_artifacts` | 每次 run 的三 hash（`strategy_ref` / `dataset_snapshot_hash` / `risk_rules_hash`）+ artifact 指针 | **待建（X0 载体）**；🔒 冻结面，变更须走评审 |
 | `run.worker_registry` | worker 注册与心跳 | 待建（多 worker 时） |
+| `quant.strategy_state`（不属本仓） | 运行状态检查点（断点续跑） | 归 strategy-runtime 模块 · core 写（2026-10-21 裁决，指 `tellurion:docs/design/system-spec-review-2026-10-21.md` H5） |
 
-**归属修正**（ADR-D19 已登记）：`backtest_jobs` / `strategy_state` 目前在内核侧持久化，**迁到 `run`**，内核走 port —— 否则"内核无持久化状态"不成立。
+> 🔒 **冻结标注**：`run_artifacts` 的三 hash 与 artifact 指针属 **ResultSpec 冻结 schema 面**（`tellurion:docs/SPEC.md` K9「ResultSpec 冻结」；内容寻址三兄弟见 `tellurion-contracts:docs/api-schema.md` §3）——增列 / 改口径 / 改 hash 算法都算改冻结面，**须走评审**（`tellurion:docs/TASKS.md`「维护本文件」的冻结 schema 变更评审硬规则），不得顺手改。
 
-> ⚠️ **这条迁移给 core 留了一笔欠账**（2026-10-20 审查发现，已登记为 repo-inventory **U3**）：
-> core 需要新增 `RunStateStore` port（`Save(ctx, runID, state)` / `Load(ctx, runID)`），实现在本仓。
-> **不补这个 port，X5 一动 core 就编不过**——所以 U3 是本仓施工序里 `X5a` 的前置，不是 core 的可选项。
+**归属修正**（ADR-D19 已登记）：`backtest_jobs` 目前在内核侧持久化，**迁到 `run`**，内核走 port。~~`strategy_state` 一并迁 `run`~~ **（⚠️ 2026-10-21 H5 裁决作废：`strategy_state` 归 strategy-runtime 模块，core 继续写 `quant.strategy_state`，不迁 `run`，见 `tellurion:docs/design/system-spec-review-2026-10-21.md` H5）**。
+
+> ⚠️ **2026-10-21 订正（H5 裁决）**：原「这条迁移给 core 留了一笔欠账：core 需要新增 `RunStateStore` port（`Save(ctx, runID, state)` / `Load(ctx, runID)`），实现在本仓；不补这个 port，X5 一动 core 就编不过——U3 是本仓施工序里 `X5a` 的前置」**作废**——该欠账（repo-inventory **U3**）以「`strategy_state` 迁 `run`」为前提，随裁决一并作废：`strategy_state` 留 core（strategy-runtime 模块，core 写 `quant.strategy_state`），不需要 `RunStateStore` port，`X5a` 不再以 U3 为前置。
 
 ## 2. 只读输入（不属于本仓，禁止写入）
 
@@ -46,7 +48,7 @@ verified-by: 功能边界固化（三份契约：db / api / dataflow）
 2. **提交异步**：所有 run 走 job 队列，没有"同步跑完再返回"的端点。
 3. **三 hash 必留**：任何 run 的结果必须能回答"哪份策略 / 数据 / 规则"。
 4. **worker 摘除要优雅**：`drain` 后不再接新活，跑完手上的再下线。
-5. **内核无持久化状态**是目标态：状态写 `run`，内核走 port。
+5. **内核无持久化状态**是目标态：任务状态写 `run`，内核走 port。⚠️ 例外已裁（2026-10-21 H5）：`strategy_state` 归 strategy-runtime 模块（K0 冻结契约），core 写 `quant.strategy_state`，不迁 `run`。
 
 ## 4. 建表与迁移
 
