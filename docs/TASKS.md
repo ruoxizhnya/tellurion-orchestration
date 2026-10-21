@@ -21,10 +21,10 @@ verified-by: 任务台账批量重分布（X 线单展开：QT-44 迁入）
 
 > **迁入说明（2026-10-21）**：本单自 core 仓 `tellurion:docs/TASKS.md`「五、X 线」迁入（任务台账批量重分布：X 线单展开到各服务仓为正式六字段单，「占位仓不写正式任务单」旧约定同时作废）。六字段正文逐字保留、不改写；core 侧同号条目已改为指针。
 
-- **① 目标**：批量扫描的算力出口独立成服务；`backtest_jobs` / `strategy_state` 归属迁出内核；三 hash 落 `run_artifacts`。
+- **① 目标**：批量扫描的算力出口独立成服务；`backtest_jobs` 归属迁出内核；三 hash 落 `run_artifacts`。
 - **② 上下文**：`orchestration-service-design.md`（D22）+ BE-03；`BatchEngine` 已按 `contracts.EngineRunner` 注入，摘出成本低。
-- **③ 要求**：① `job`/`batch`/`walkforward` 从 `pkg/backtest` 上移；② worker 池调度 + 断点续跑协调；③ `run` schema（`backtest_jobs`/`walk_forward_reports`/`run_artifacts`/`strategy_state`）；④ `/api/runs/{id}/provenance` 端点；⑤ 内核通过 port 读写这些表。
-- **② 前置（U3，2026-10-20 审查补登记）**：`strategy_state` 迁 `run` 之前，core 必须先有 **`RunStateStore` port**（`Save(ctx, runID, state)` / `Load(ctx, runID)`），否则**内核失去状态持久化、X5 一动就编不过**。这个 port 以前谁都没登记，只在 `orchestration-service-design.md` 里被当成"内核走 port"一句带过。
+- **③ 要求**：① `job`/`batch`/`walkforward` 从 `pkg/backtest` 上移；② worker 池调度 + 断点续跑协调；③ `run` schema（`backtest_jobs`/`walk_forward_reports`/`run_artifacts`/`batch_runs`/`worker_registry`），**不含 `strategy_state`**（H5 裁决：归 strategy-runtime 模块，core 继续写 `quant.strategy_state`）；④ `/api/runs/{id}/provenance` 端点；⑤ 内核通过 `JobQueue` port 读写 job 表；`run_artifacts` 的吸收口径见 QT-63 裁决（过渡期 core `quant.run_provenance`，O1 双写/对拍/切读/停写后取代）。
+- **② 前置（2026-10-21 订正：原 U3 `RunStateStore` port 已作废）**：H5 裁决（`tellurion:docs/design/qt-decoupling/orchestration-service-design.md` §3 归属修正）明确 `strategy_state` **不迁 `run`**、归 strategy-runtime 模块（K0 冻结契约 `contracts/kernel_modules.schema.sql`），core 继续写 `quant.strategy_state`；因此 `RunStateStore` port **不需要**，本单前置减少为「`JobQueue` port 外置」一项。
 - **④ 约束与非目标**：不在内核保留编排逻辑；不改 `EngineRunner` 契约；不做 K8s；**不搬 `cmd/dualrun`**——它 2026-10-20 已裁决留 core（要同进程链接两个内核，且是引擎的验收门，见 `repo-inventory.md` §3）。
 - **⑤ 验收**：`pkg/backtest` 里 `job|batch|walkforward` 零命中；同一 batch 在编排服务与旧路径结果一致；provenance 端点返回三 hash。
 - **⑥ 边界**：只做编排与结果归属。
