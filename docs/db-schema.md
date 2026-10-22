@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-10-20
-verified-by: 功能边界固化（三份契约：db / api / dataflow）
+last-verified: 2026-10-22
+verified-by: M8 接口对表（QT-44 前置 ②）
 ---
 
 # DB Schema — tellurion-orchestration
@@ -18,11 +18,11 @@ verified-by: 功能边界固化（三份契约：db / api / dataflow）
 
 | 表 | 内容 | 现状 |
 |---|---|---|
-| `run.backtest_jobs` | 任务队列（queued→running→done/failed） | 从 core 的 `backtest_jobs`（无归属 schema）迁入 |
-| `run.walk_forward_reports` | 前向验证报告 | 从 core 迁入 |
+| `run.backtest_jobs` | 任务队列（生命周期六态 + K9 `result_status` 两轴，见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.5） | 从 core 的 `backtest_jobs`（无归属 schema）迁入 |
+| `run.walk_forward_reports` | 前向验证报告（`wf_id` + 逐窗 run 指针） | 从 core 迁入 |
 | `run.batch_runs` | 批量扫描批次 + 评分汇总 | 待建 |
 | `run.run_artifacts` | 每次 run 的三 hash（`strategy_ref` / `dataset_snapshot_hash` / `risk_rules_hash`）+ artifact 指针 | **待建（X0 载体）**；🔒 冻结面，变更须走评审 |
-| `run.worker_registry` | worker 注册与心跳 | 待建（多 worker 时） |
+| `run.worker_registry` | worker 注册与心跳（active / draining / offline） | 待建（多 worker 时） |
 | `quant.strategy_state`（不属本仓） | 运行状态检查点（断点续跑） | 归 strategy-runtime 模块 · core 写（2026-10-21 裁决，指 `tellurion:docs/design/system-spec-review-2026-10-21.md` H5） |
 
 > 🔒 **冻结标注**：`run_artifacts` 的三 hash 与 artifact 指针属 **ResultSpec 冻结 schema 面**（`tellurion:docs/SPEC.md` K9「ResultSpec 冻结」；内容寻址三兄弟见 `tellurion-contracts:docs/api-schema.md` §3）——增列 / 改口径 / 改 hash 算法都算改冻结面，**须走评审**（`tellurion:docs/TASKS.md`「维护本文件」的冻结 schema 变更评审硬规则），不得顺手改。
@@ -46,9 +46,11 @@ verified-by: 功能边界固化（三份契约：db / api / dataflow）
 
 1. **只派活不裁决**：编排层不解释结果、不改结果、不重算指标。
 2. **提交异步**：所有 run 走 job 队列，没有"同步跑完再返回"的端点。
-3. **三 hash 必留**：任何 run 的结果必须能回答"哪份策略 / 数据 / 规则"。
+3. **三 hash 必留**：任何**终态 `completed` / `invalid`** 的 run 必须能回答"哪份策略 / 数据 / 规则"。⚠️ 这不是**入队**门槛——三 hash 是 run 开始后才算出的产物（QT-63）；入队只校验三份引用可解析（`ARCHITECTURE.md` §9.1 F8）。
 4. **worker 摘除要优雅**：`drain` 后不再接新活，跑完手上的再下线。
 5. **内核无持久化状态**是目标态：任务状态写 `run`，内核走 port。⚠️ 例外已裁（2026-10-21 H5）：`strategy_state` 归 strategy-runtime 模块（K0 冻结契约），core 写 `quant.strategy_state`，不迁 `run`。
+6. **`run` 不存结果内容**：只存 `result_uri` 指针 + 三 hash；结果明细归 core 的 state store / artifact 服务（`ARCHITECTURE.md` §9.7 R2）。
+7. **两轴状态不合并**：`status` 是队列生命周期（`pending|running|cancelling|completed|failed|cancelled`），`result_status` 是 K9 三值（`completed|invalid|failed`）。`invalid` **不得**写成 `failed`，`cancelled` 不得删行。
 
 ## 4. 建表与迁移
 
@@ -66,6 +68,20 @@ verified-by: 功能边界固化（三份契约：db / api / dataflow）
 - 跨 schema 取数只走**只读视图或 API**；出现 `join` 别人的表就是边界腐化的第一信号。
 - 结构变更的同步义务：本文件 + `docs/ARCHITECTURE.md` 的「数据归属」节必须同一次提交里更新。
 
-## 5. 待定
+## 5. 目标键与迁移（M8 接口对表，2026-10-22）
+
+> **本节只钉「表要回答什么、键怎么定」，列清单与类型在 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.5**（单一处维护，避免两份漂移）。落地前**不改库**；O0 按 §4 的机制建表。
+
+| 表 | 目标主键 / 唯一键 | 关键语义 |
+|---|---|---|
+| `run.backtest_jobs` | `id`；`UNIQUE(idempotency_key) WHERE NOT NULL`；索引 `(status, priority DESC, created_at)` where `pending` | `request_json` 是完整 canonical RunSpec（worker 只执行这一份）；`status` 六态；`result_status` K9 三值可空；`worker_id` / `lease_until` / `attempts` / `cancel_requested` 支撑多 worker；`result_uri` 是结果指针；**目标无 `result` 内容列**（迁移期旧列保留只读，切读后删除） |
+| `run.run_artifacts` | `run_id` | 三 hash + `artifact_uri` 是冻结最小集；**无 `status`**（QT-63 ④）；`/provenance` 与本表 ⋈ `backtest_jobs` 取结论 |
+| `run.batch_runs` | `batch_id`；`UNIQUE(idempotency_key)` | 网格 + base RunSpec + 三值计数 + 排序汇总；不复制子结果 |
+| `run.walk_forward_reports` | `wf_id`；`UNIQUE(idempotency_key)` | 窗口配置 + 逐窗 run 指针 + 三值计数；部分失败显式计数 |
+| `run.worker_registry` | `worker_id` | 能力（`kernels`）/ 心跳 / active → draining → offline；超时不删行 |
+
+**迁移路径**（与 QT-63 ③-① 一致）：`backtest_jobs` / `walk_forward_reports` 双写 → 对拍 → 切读 → 停写；`quant.run_provenance` 由 `run.run_artifacts` 双写/对拍/切读/停写后取代。**子 run 关系**（batch / wf 的 task / window → `backtest_jobs` 行）待裁，见 `ARCHITECTURE.md` §9.7 R6，未定前不建第六张表。
+
+## 6. 待定
 
 - `cmd/dualrun`（K15 双跑）**已裁决留 core**（2026-10-20）：它的产物（成交明细与对齐报告）不落 `run` schema，本仓不承接它的状态与结果。
