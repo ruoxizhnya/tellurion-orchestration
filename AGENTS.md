@@ -6,9 +6,9 @@
 
 编排 / worker 服务：job / batch / walkforward 的算力出口，schema `run`。把"批量扫"从 core 进程里搬出来。
 
-**状态**：已启动（2026-10-23 施工 ①）——X5a/X5c 已落 `internal/queue`，X5b/X0 未做
+**状态**：已启动（2026-10-23 施工 ①②③）——X5a/X5c 的语义（`JobQueue` + `WorkerRegistry` + `run` schema 5 表 DDL）已落 `internal/queue`，jobs 4 端点的 HTTP 面已落 `internal/httpapi`，**DDL 已接 PG 并有启动迁移**（`internal/pgstore` + `cmd/orchestrationservice`）。X5b（batch/walkforward）与 X0（`run_artifacts`/`provenance`）未做
 
-**今天的实现**（本仓，2026-10-23）：`internal/queue` 的 `JobQueue` + `WorkerRegistry` 两个 port、内存实现（幂等键 + 租约 + 两轴状态 + `ReapExpired`）、`run` schema 5 表 DDL 常量；`internal/httpapi` 的 jobs 4 端点（提交幂等 / 查询 / 取消 / 列表）。**未接 PG**；batch / walkforward / worker / provenance 端点未落；细节见 `docs/ARCHITECTURE.md` §9.8。
+**今天的实现**（本仓，2026-10-23）：`internal/queue` 的两个 port + 内存实现 + DDL 常量；`internal/pgstore` 的 PG 实现（`Claim` 用 `FOR UPDATE SKIP LOCKED`、提交路径上一把 `pg_advisory_xact_lock` 让 `queue_full` 阈值在并发下精确）；`internal/qtest` 的**语义套件**（37 条用例，内存与 PG 各跑一遍——「换实现行为不变」这句判据只有共享用例才可执行）；`internal/testdb`（PG 腿跨进程排队）；`cmd/orchestrationservice`（DSN fail-closed → 迁移 → 监听 `:8088` → 周期 `ReapExpired`）。**未落**：batch / walkforward / worker / provenance 端点、worker 领取后的执行装配（引擎在 core，本仓不引）、鉴权（R5）；R8、R9 已于 2026-10-23 裁决但代码未落（下一笔）。细节见 `docs/ARCHITECTURE.md` §9.8。
 
 **迁出前的老实现**（core，待切读后停写）：`core:pkg/backtest/batch` + `core:pkg/backtest/walkforward` + `backtest_jobs` / `walk_forward_reports` 表。
 
@@ -23,6 +23,9 @@ go test ./...
 ```
 
 - 这三条是 R1/R2 的判据：**单独 checkout 就能绿**。
+- 可选集成测试（无库时自动 skip，不是假绿）：
+  - PG：`ORCHESTRATION_TEST_DSN='postgres://postgres:postgres@127.0.0.1:5432/tellurion_orchestration_test?sslmode=disable' go test ./internal/pgstore -count=1`
+    —— 它跑的是与内存实现**同一套**语义套件（`internal/qtest`），外加 SKIP LOCKED / 唯一索引 / JSONB 三条 PG 专属腿。
 - 若某一步需要别的仓的源码目录才过，那是**边界画错了**——停下来修边界，**不要**加 `replace ../xxx` 绕过。
 - 本机同时改多个仓时可用 `go.work` 联调，但**它不入库**（`.gitignore` 已挡）。
 
@@ -52,8 +55,9 @@ go test ./...
 |---|---|---|
 | `github.com/ruoxizhnya/tellurion-contracts` | 待定（S2 后 `v0.1.0`） | `RunSpec` / `ResultSpec` 只认契约 |
 | `github.com/ruoxizhnya/tellurion-kit` | 待定（S2 后 `v0.1.0`） | 日志 / HTTP / DB 连接 |
+| `github.com/jackc/pgx/v5` | `v5.7.3` | 2026-10-23 施工 ③ 登记。`internal/pgstore`（`run` schema 的 PG 实现：`JobQueue` / `WorkerRegistry` + `Migrate`）与 `cmd/orchestrationservice` 使用；版本与 core / kit / strategy / agent 对齐。**`internal/queue` 保持零第三方依赖**（port + DTO + 内存实现 + DDL 只用标准库），驱动只进 `pgstore` 一个包 |
 
-> 今日 `go.mod` **零 require**：`internal/queue` 只用 stdlib（`database/sql` 的 DDL 文本是字符串常量，尚不建连接）。上表两项在真正引入前不动 `go.mod`。
+> 今日 `go.mod` 的**唯一直接依赖**是 `pgx v5.7.3`（其余是它的间接依赖）。上表前两项在真正引入前不动 `go.mod`。
 
 > 跨仓依赖**只认版本号**（伪版本或 tag），不认源码路径。契约变更走 `tellurion-contracts` 的发布，不走"顺手改一下"。
 

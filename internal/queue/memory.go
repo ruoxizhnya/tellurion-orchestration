@@ -22,9 +22,10 @@ const (
 	MaxListLimit     = 100
 	DefaultListLimit = 50
 
-	// attemptsExhaustedMessage 是租约重试用尽时写入 error_message 的固定文案
-	// （docs/ARCHITECTURE.md §9.5 的两轴映射表）。
-	attemptsExhaustedMessage = "attempts_exhausted"
+	// AttemptsExhaustedMessage 是租约重试用尽时写入 error_message 的固定文案
+	// （docs/ARCHITECTURE.md §9.5 的两轴映射表）。两个实现共用：审计与告警
+	// 按这条串识别「不是引擎故障，是重试预算用尽」。
+	AttemptsExhaustedMessage = "attempts_exhausted"
 )
 
 // MemoryOptions 是 Memory 的可注入项。零值即可用；测试用 Now/NewID 固定时钟。
@@ -75,8 +76,8 @@ func NewMemory(opts ...MemoryOptions) *Memory {
 		byKey:    make(map[string]string),
 		now:      o.Now,
 		newID:    o.NewID,
-		maxDepth: o.MaxQueueDepth,
-		maxAtt:   o.DefaultMaxAttempts,
+		maxDepth: ResolveQueueDepth(o.MaxQueueDepth),
+		maxAtt:   ResolveMaxAttempts(o.DefaultMaxAttempts, 0),
 		workers:  o.Workers,
 	}
 	if m.now == nil {
@@ -85,14 +86,34 @@ func NewMemory(opts ...MemoryOptions) *Memory {
 	if m.newID == nil {
 		m.newID = randomID
 	}
-	if m.maxDepth <= 0 {
-		m.maxDepth = DefaultMaxQueueDepth
-	}
-	if m.maxAtt <= 0 {
-		m.maxAtt = DefaultMaxAttempts
-	}
 	return m
 }
+
+// ResolveQueueDepth 把装配项里的深度上限解析成生效值（<=0 = 未指定 = 默认）。
+// 两个实现共用：同一份部署配置不能让内存实现限 10000、PG 实现不限深度。
+func ResolveQueueDepth(fromOptions int) int {
+	if fromOptions <= 0 {
+		return DefaultMaxQueueDepth
+	}
+	return fromOptions
+}
+
+// ResolveMaxAttempts 把「行上的 max_attempts」按两级默认解析成生效值：
+// 装配默认 <=0 时取 DefaultMaxAttempts，行未指定（<=0）时取装配默认。
+// 两个实现共用，否则同一请求在两种装配下重试预算不同。
+func ResolveMaxAttempts(optsDefault, rowMaxAttempts int) int {
+	if optsDefault <= 0 {
+		optsDefault = DefaultMaxAttempts
+	}
+	if rowMaxAttempts <= 0 {
+		return optsDefault
+	}
+	return rowMaxAttempts
+}
+
+// NewRunID 生成一个 run id（32 位十六进制随机串）。两个实现共用它：
+// 行的身份形状不属于某一个实现。
+func NewRunID() string { return randomID() }
 
 func randomID() string {
 	var b [16]byte
@@ -157,9 +178,7 @@ func (m *Memory) Enqueue(ctx context.Context, rec *RunRecord) (*RunRecord, bool,
 	row.ResultURI = ""
 	row.StartedAt = time.Time{}
 	row.CompletedAt = time.Time{}
-	if row.MaxAttempts <= 0 {
-		row.MaxAttempts = m.maxAtt
-	}
+	row.MaxAttempts = ResolveMaxAttempts(m.maxAtt, row.MaxAttempts)
 	if row.ID == "" {
 		row.ID = m.newID()
 	}
@@ -515,7 +534,7 @@ func (m *Memory) ReapExpired(ctx context.Context, now time.Time) (int, error) {
 		if r.Attempts >= r.MaxAttempts {
 			r.Status = RunFailed
 			r.ResultStatus = ""
-			r.ErrorMessage = attemptsExhaustedMessage
+			r.ErrorMessage = AttemptsExhaustedMessage
 			r.CompletedAt = at
 			continue
 		}

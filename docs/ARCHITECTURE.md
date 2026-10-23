@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-23
-verified-by: 施工 ①（QT-44 X5a/X5c 语义落地，见 §9.8）
+verified-by: 施工 ③（§9.8 重写：内存 + PG 双实现跑同一套 qtest 语义用例）
 ---
 
 # 架构 — tellurion-orchestration
@@ -193,7 +193,8 @@ type WorkerRegistry interface {
 | `id` | `TEXT PRIMARY KEY`（UUID 文本，≤64） | run 身份；`quant.run_provenance.run_id` 与之对齐（QT-63 ⑤） |
 | `idempotency_key` | `TEXT`，部分唯一索引 `WHERE idempotency_key IS NOT NULL` | 幂等键；**不可为空**由 API 层保证，DB 允许 NULL 只为迁移存量行 |
 | `request_hash` | `CHAR(64) NOT NULL` | `sha256(canonical request_json)`；幂等冲突判据 |
-| `request_json` | `JSONB NOT NULL` | 完整 canonical RunSpec（含 market→kernel 解析结果）；worker **只执行这一份** |
+| `request_json` | `JSONB NOT NULL` | 完整 canonical RunSpec 的 JSONB 投影（可查询）；worker **只执行这一份**，不从扁平列重建 |
+| `request_canonical` | `TEXT NOT NULL` | 同一份内容的**字节锚点**：`request_hash = sha256(request_canonical)` 恒成立。读路径回这一列——JSONB 会规范化数字文本（实测 `1e-05` 读回 `0.00001`），拿它复算 hash 会把同一个幂等键判成两次不同请求（施工 ③ 实测，钉子 `internal/pgstore/hashanchor_test.go`） |
 | `status` | `TEXT NOT NULL` + `CHECK` | `pending` / `running` / `cancelling` / `completed` / `failed` / `cancelled`（**队列生命周期，不是 K9**） |
 | `result_status` | `TEXT` + `CHECK (… IS NULL OR … IN ('completed','invalid','failed'))` | K9 三值；终态前 NULL |
 | `priority` | `INT NOT NULL DEFAULT 0` | 越大越先领 |
@@ -205,7 +206,7 @@ type WorkerRegistry interface {
 | `result_uri` | `TEXT` | **结果本体指针**；`run` 不存结果内容（AGENTS 边界） |
 | `created_at` / `started_at` / `completed_at` | `TIMESTAMPTZ` | 时间线 |
 
-索引：`(status, priority DESC, created_at ASC) WHERE status='pending'`（领取）、`(worker_id, status)`（drain 收尾）、`(created_at DESC)`（列表）、`(idempotency_key)` 唯一（幂等）、`(result_status)`（按结论筛选）。**迁移期**保留旧 `result JSONB` 只读（O1 切读后删除），不在新代码里读写它。
+索引：`(priority DESC, created_at ASC, id ASC) WHERE status='pending'`（领取；`status` 不作键列——partial 谓词已限定，第三键 `id` 与内存实现的 tie-break 同形；谓词里**不放** `lease_until`，因为冻结判据是「已释放**或**已过期」，见 §9.2）、`(worker_id, status)`（drain 收尾）、`(created_at DESC)`（列表）、`(idempotency_key)` 唯一（幂等）、`(result_status)`（按结论筛选）。**迁移期**保留旧 `result JSONB` 只读（O1 切读后删除），不在新代码里读写它。
 
 **两轴映射（冻结；实现单按这张表写终态）**
 
@@ -267,10 +268,10 @@ type WorkerRegistry interface {
 | R5 | **鉴权与 worker 身份** | C 组全部端点未实现；worker_id 可伪造；`/api/runs/*` 与 QT-50 ④ 的鉴权矩阵未合流 | 与 QT-50 ④ 同一套 `unauthenticated` / `forbidden`；worker 注册必须带凭证（不能只报一个 id）；`drain` 只能由运维角色调用 |
 | R6 | **batch / walkforward 的子 run 关系** | 每个 task / 窗口都是独立 run，但 `run` schema 只有 5 张表；直接在 `backtest_jobs` 加 `parent_id` 会跨表引用两种父（batch / wf） | 二选一：(a) `run.run_children(parent_kind, parent_id, child_run_id)` 第六张表（结构变更走 ADR）；(b) 子 run 的 `request_json` 带 `parent` 元数据、父表存 `child_run_ids TEXT[]`。**倾向 (a)**：可查询、可加唯一约束 |
 | R7 | **队列深度与 `queue_full` 阈值** | 今天无上限（每 job 一个 goroutine）；429 语义在新端点冻结，但阈值是部署配置 | 契约只冻结「达上限 → 429 + `queue_full`」；默认值由部署配置给出（建议 `max_pending = worker 数 × 4`，压测后定），不进契约 |
-| R8 | **`cancelling` 行的租约回收出口**（2026-10-23 施工 ① 新登记） | §9.5 的 `ReapExpired` 只定义了 `running` 的回收：`cancelling` 行的 owner 若崩溃，`AckCancel` 因租约过期拒绝、`ReapExpired` 又不处理它——该行会永久停在中间态 | 二选一：(a) `ReapExpired` 同批把「`cancelling` 且租约过期」落 `cancelled`（与两轴映射表的 `cancelling → cancelled` 一致，**倾向**）；(b) 新增运维端点强制终态。定之前内存实现**不擅自补语义**（见 §9.8 取舍 4） |
-| R9 | **按内核能力（`Kernels`）领取过滤**（2026-10-23 施工 ① 自审新登记） | §9.3 写 `Kernels` 用于"未知内核的 worker 不接该活"，但 §9.2 冻结的 `Claim(ctx, workerID, lease)` **没有内核参数**——过滤无法在领取点实现；`WorkerRecord.Kernels` 落了库但没有消费方 | 二选一：(a) `Claim` 加内核参数（**方法签名改 = MAJOR**，§9.6 版本策略）；(b) 内核过滤移到编排层（派活前查注册表，不进队列方法集）。倾向 (b)：`JobQueue` 只管队列，内核路由属编排职责。定之前 `Kernels` 只落库不消费（见 §9.8 取舍 6） |
+| R8 | **`cancelling` 行的租约回收出口**（2026-10-23 施工 ① 新登记；**已裁 2026-10-23 = 选 (a)**，代码未落） | §9.5 的 `ReapExpired` 只定义了 `running` 的回收：`cancelling` 行的 owner 若崩溃，`AckCancel` 因租约过期拒绝、`ReapExpired` 又不处理它——该行会永久停在中间态 | 二选一：(a) `ReapExpired` 同批把「`cancelling` 且租约过期」落 `cancelled`（与两轴映射表的 `cancelling → cancelled` 一致，**倾向**）；(b) 新增运维端点强制终态。定之前内存实现**不擅自补语义**（见 §9.8 取舍 4） |
+| R9 | **按内核能力（`Kernels`）领取过滤**（2026-10-23 施工 ① 自审新登记；**已裁 2026-10-23 = 加可选新接口**，代码未落） | §9.3 写 `Kernels` 用于"未知内核的 worker 不接该活"，但 §9.2 冻结的 `Claim(ctx, workerID, lease)` **没有内核参数**——过滤无法在领取点实现；`WorkerRecord.Kernels` 落了库但没有消费方 | 二选一：(a) `Claim` 加内核参数（**方法签名改 = MAJOR**，§9.6 版本策略）；(b) 内核过滤移到编排层（派活前查注册表，不进队列方法集）。倾向 (b)：`JobQueue` 只管队列，内核路由属编排职责。定之前 `Kernels` 只落库不消费（见 §9.8 取舍 6） |
 
-### 9.8 实现现状（2026-10-23，施工 ①）
+### 9.8 实现现状（2026-10-23，施工 ③）
 
 > 本节是给下一个 agent 的判据：只看本仓即可分辨「已落地」与「只是接口就位」。与 §9.5 冲突时以 §9.5 为准（那是冻结形状）。
 
@@ -295,30 +296,55 @@ type WorkerRegistry interface {
 
 **传输层口径（施工 ②）**：① 缺幂等键 → 400 `missing_idempotency_key`，在领域校验**之前**判（fail-closed ②，服务端不代生成键）；② 列表的 `total` 是**钳制后本次返回的行数**（冻结方法集没有 Count 能力，全量命中数待 PG 实现裁决）；③ `unauthenticated` / `forbidden` 暂不产生（R5 鉴权未裁）；④ `run_spec` 以 `json.RawMessage` 原样入队（形状校验归引擎侧，本层只管 canonical 化 + hash）。
 
+**落地包（施工 ③：DDL 接 PG + 启动迁移）**
+
+| 文件 | 内容 | 对应 |
+|---|---|---|
+| `internal/pgstore/store.go` | `Open`（DSN 空 fail-closed，不退回内存）/ `Migrate`（按序幂等执行 `queue.Migrations()`）/ `Options` / `jobCols` 派生两条列清单 / `rowToJob`（NULL↔零值、UTC、CHAR 补齐裁剪）/ `lockJob`（`FOR UPDATE`）/ `checkLease` | §9.2 A-1、§9.5 |
+| `internal/pgstore/queue.go` | `JobQueue` 的 PG 实现 10 方法：`Claim` 用 `FOR UPDATE SKIP LOCKED` + `priority DESC → created_at → id`；`Enqueue` 在 `pg_advisory_xact_lock` 里做「查键 → 数深度 → 插行」；终态方法先锁行再按 §9.5 两轴映射表判定 | X5a 的 durable 侧 |
+| `internal/pgstore/registry.go` | `WorkerRegistry` 的 PG 实现（UPSERT 保 status/started_at/drain 时刻） | X5c 的 durable 侧 |
+| `internal/qtest/suite.go` | **语义套件**：29 条队列用例 + 6 条注册表用例 + 2 条跨 port 用例，内存与 PG 各跑一遍 | §9.8「换 PG 实现时行为不变」的可执行判据 |
+| `internal/testdb/testdb.go` | PG 腿 harness：跨测试**进程**的会话级 advisory lock + 每用例前清库 | 见下方「施工 ③ 的三条实测」第 3 条 |
+| `cmd/orchestrationservice/main.go` | 进程装配：`-dsn`/`ORCHESTRATION_DSN`（两者都空即拒绝启动）→ `Migrate` → 监听（`127.0.0.1:8088`，jobs 4 端点 + `/healthz`）+ 周期 `ReapExpired`（`-reap-interval`，默认 30s） | §9.5 建表入口、`dataflow.md` §2 第 7 步 |
+| `internal/pgstore/*_test.go` | PG 专属腿：迁移幂等 + 表/索引形状、列清单双向核对、`CHAR(64)` 补齐、三条库约束（唯一索引 / 两个 CHECK / FK）、租约谓词、`request_canonical` 锚点、并发领取不重发 | 破坏验证的落点 |
+
+**PG 侧口径（施工 ③）**：① 时间一律由**应用侧** UTC 时钟提供（`ReapExpired` 的签名本来就收 `now`；内存实现同样如此），不用 DB 的 `now()`——混用会让「租约是否过期」在一次调用里有两个答案；代价是跨进程时钟漂移直接移动租约边界，部署必须让 worker 与 PG 同时钟源。② 读路径的 `RequestJSON` 取 `request_canonical`（TEXT 锚点），`request_json`（JSONB）只作查询投影。③ 端口 `8088` 是本仓自定的监听地址（`-addr` 可覆盖），不在任何跨仓契约里；⚠️ 同期兄弟仓的 `cmd` 默认值有撞号（strategy `:8085` = core 的 analysis-service，risk `:8086` = ai-service，analytics `:8087`），登记在此、属跨仓问题，不由本仓单方面改别人的默认值。
+
+**施工 ③ 的三条实测**（都是先红后修出来的，不是设计时想到的）：
+1. `UPDATE … FROM (SELECT … FOR UPDATE SKIP LOCKED) RETURNING id, …` 里的裸 `id` 是**歧义列**（外层 `j` 与子查询 `c` 都有），PG 直接报 42702 → 列清单改为从 `jobCols` 派生带别名的版本。
+2. 同一个参数在一条语句里既进 `CAST($4 AS jsonb)` 又进 TEXT 列时，PG 按 jsonb 上下文定型该参数，于是 TEXT 列存进去的是 **jsonb 的文本表示**（`{"a": 1}` 多一个空格）——锚点列当场失效。处置：两处都显式 `$4::text`。同类问题在 `worker_registry` 的 UPSERT 上以「未类型化 NULL 被推成 text」的形式又红了一次（显式 `::timestamptz`）。
+3. `go test ./...` 会**并行跑不同包**的测试二进制，两个包的 PG 腿共用同一个测试库时，A 包的「用例前清库」删掉了 B 包正在断言的行——症状是幂等重放莫名变成 202 新建，且**单跑任一包永远绿**。处置：`internal/testdb` 的会话级 advisory lock 把 PG 腿跨进程排队（实测：并发启动时后者的耗时从 0.23s 变成 3.0s，即真的在等锁）。
+
 **能跑 / 只是接口就位**
 
 | 能力 | 现状 |
 |---|---|
-| 入队幂等（同键同 hash 重放 / 不同 hash 冲突 / 队列满） | ✅ 内存实现 + 单测 |
-| 原子领取（priority → created_at → id）+ 租约续期 | ✅ 内存实现 + 单测；PG 的 `SKIP LOCKED` **未落** |
-| 两轴终态（`completed+completed` / `completed+invalid` / `failed+failed` / `failed+NULL`） | ✅ 内存实现 + 单测 |
-| 取消（`pending`→`cancelled` 保留行；`running`→`cancelling`；owner `AckCancel`） | ✅ 内存实现 + 单测 |
-| 租约回收（`attempts+1` / `attempts_exhausted`） | ✅ 内存实现 + 单测 |
-| worker 注册 / 心跳 / drain（重复注册不洗回 `active`，也不重置 `started_at`） | ✅ 内存实现 + 单测 |
-| 按内核能力（`Kernels`）过滤领取 | ⬜ **无法在 `Claim` 实现**——冻结的方法集没有内核参数（§9.7 R9）；`Kernels` 只落库不消费 |
-| `run` schema 建表 | ✅ DDL 落盘；**未接 PG**（本仓今天没有数据库装配） |
-| PG 版 `JobQueue`（`FOR UPDATE SKIP LOCKED`） | ⬜ 未实现——内存实现只保证语义，不保证多进程 |
+| 入队幂等（同键同 hash 重放 / 不同 hash 冲突 / 队列满） | ✅ 内存 + PG，同一套 qtest 用例；PG 的深度阈值在提交锁内判定（并发下精确，不是尽力而为） |
+| 原子领取（priority → created_at → id）+ 租约续期 | ✅ 内存 + PG（`FOR UPDATE SKIP LOCKED` 实测并发不重发）|
+| 两轴终态（`completed+completed` / `completed+invalid` / `failed+failed` / `failed+NULL`） | ✅ 内存 + PG |
+| 取消（`pending`→`cancelled` 保留行；`running`→`cancelling`；owner `AckCancel`） | ✅ 内存 + PG |
+| 租约回收（`attempts+1` / `attempts_exhausted`） | ✅ 内存 + PG（`SKIP LOCKED` 可重入）；`cmd` 里有周期调用 |
+| worker 注册 / 心跳 / drain（重复注册不洗回 `active`，也不重置 `started_at`） | ✅ 内存 + PG |
+| 跨进程共享队列（A 提交 / B 领取写终态 / A 查到结果） | ✅ `cmd/orchestrationservice` 的端到端腿（真库，两个独立连接池） |
+| `run` schema 建表 | ✅ DDL 落盘 + `pgstore.Migrate` 启动执行；已在真库跑过（含幂等重跑） |
+| 按内核能力（`Kernels`）过滤领取 | ⬜ **无法在 `Claim` 实现**——冻结的方法集没有内核参数（§9.7 R9，2026-10-23 已裁「加可选新接口」，落地在下一笔）；`Kernels` 只落库不消费 |
+| `cancelling` 行的租约回收出口 | ⬜ §9.7 R8 已裁（同批落 `cancelled`），代码未改（下一笔）；当前两个实现都只扫 `running`，owner 崩溃则该行停在中间态 |
 | 入队前「内核 / 市场可解析」校验（§9.4 fail-closed ①） | ⬜ 未实现（依赖 `EngineRegistry` / `MarketRouter`，本仓不引） |
 | `batch` / `walkforward` / `run_artifacts` / 其余 C 组端点（batch / walkforward / worker / provenance） | ⬜ 未实现（X5b / X0）；jobs 4 端点已落（见上表） |
-| worker 心跳超时 → `offline` | ⬜ 未实现（方法集冻结，无回收方法；补要新接口 = MAJOR，见 R8 同类问题） |
+| worker 心跳超时 → `offline` | ⬜ 未实现（方法集冻结，无回收方法；补要新接口 = MINOR，见 R8 同类问题） |
 
-**六条故意取舍**
+**故意取舍（施工 ①②③ 累计）**
 
 1. **DDL 用 Go 数组、不用 `migrations/*.sql`**：取向 ①（与 core 一致，运维零新增）；`Migrations()` 只返副本，已落库语句只前滚。
 2. **`Enqueue` 现算 `request_hash`**：调用方自带 hash 与 `request_json` 不符时直接 `ErrInvalidInput`——幂等判据不允许有两个来源。
 3. **`Complete` 不接受 `cancelling` 行**：取消一经请求结果即作废，worker 只能 `AckCancel`（两轴映射表里 `cancelling` 的唯一出口是 `cancelled`）。
-4. **`ReapExpired` 只扫 `running`**：`cancelling` 行在 owner 消失后没有出口，属 §9.5 未定义口径——**不擅自补语义**，登记为 R8。
-5. **`worker_id` 在回收后保留**：`pending` 行没有 owner，但留上一次 owner 便于审计；Claim 时覆盖。
-6. **`Kernels` 只落库不消费**：冻结的 `Claim` 没有内核参数，按能力过滤放不进队列方法集（加参数 = MAJOR）——登记为 R9，倾向把过滤移到编排层。
+4. **`ReapExpired` 只扫 `running`**：`cancelling` 行在 owner 消失后没有出口，属 §9.5 未定义口径——**不擅自补语义**，登记为 R8。⚠️ 2026-10-23 R8 **已裁**（同批落 `cancelled`），代码尚未改，落在下一笔（施工 ④）；裁决前两个实现保持这条一致性比「PG 先支持」更重要。
+5. **`worker_id` 在回收后保留**：`pending` 行没有 owner，但留上一次 owner 便于审计；Claim 时覆盖。口径说明：§9.5 那列表把 `worker_id` 写成「当前 owner」，而 §9.2 的领取判据只用 `status` + `lease_until` 两列——这里按「租约才是派活判据，worker_id 是审计痕迹」解释，内存与 PG 两侧同形（PG 的 reap SQL 不碰该列），不是各写各的。
+6. **`Kernels` 只落库不消费**：冻结的 `Claim` 没有内核参数，按能力过滤放不进队列方法集（加参数 = MAJOR）——登记为 R9，2026-10-23 已裁「加可选新接口（MINOR）」，落地在下一笔。
+7. **PG 的提交路径上一把 `pg_advisory_xact_lock`**（施工 ③）：「查幂等键 → 数 pending 深度 → 插一行」在内存里由单锁保证原子，PG 上不加锁就是两个并发提交各自看到「还没满」，`queue_full` 的 429 语义随之失效（用例 `ConcurrentQueueFullIsExact` 钉住：深度 1、8 个并发 → 恰好 1 接受 7 拒）。代价如实说：提交被串行化，但提交面本就低频（批量扫描是父记录一次提交 + 展开子行），换阈值精确是划算的。advisory lock 是**实例级**命名空间，键 `0x52554E51` 全仓唯一。
+8. **时间戳由应用侧给，不用 DB 的 `now()`**（施工 ③）：`ReapExpired(ctx, now)` 的冻结签名本身就收 `now`，内存实现也用自己的时钟；混用会让一次调用里「租约是否过期」有两个答案。代价：跨 worker 进程时钟漂移直接移动租约边界 ⇒ 部署需同时钟源（NTP），已在「PG 侧口径」写明。
+9. **`request_canonical` 与 `request_json` 存同一份内容两种形状**（施工 ③）：前者是 identity 的字节锚点、后者是查询投影。看起来像冗余存储，但红线 6「不存结果内容」管的是结果本体，不是请求身份；不这么做的替代方案是把 `request_json` 改成 TEXT（丢掉可查询性）或在读时复算 hash（实测会漂）。加列 = MINOR（§9.6）。
+10. **PG 腿跨测试进程排队**（施工 ③）：`internal/testdb` 用会话级 advisory lock 把两个包的 PG 腿串行化。代价是本地跑全套 PG 腿约 3-4 秒；换来的是不再有「只有 `go test ./...` 才红、单跑永远绿」的假红。
+11. **`offline` 那条迁移不在套件里凑**（施工 ③）：port 里没有把 draining 推到 offline 的入口（§9.8 未落项），套件只测「从 port 可达」的状态机分支；用直接改库凑出来的覆盖比空白更容易骗人。
 
-**自检结论**：单测层面成立；端到端不可用——没有 PG 装配、没有 worker 进程，HTTP 面只有 jobs 4 端点（batch / walkforward / provenance / worker 端点未落）。判据是「X5a/X5c 语义已定形 + jobs 传输面已定形，落地未完成」。
+**自检结论**：语义面与 durable 面都已落地——`JobQueue` / `WorkerRegistry` 各有两个实现（内存 + PG），跑的是**同一套** qtest 用例（37 条），PG 腿在真库上绿；`cmd/orchestrationservice` 能在启动时建库并对外提供 jobs 4 端点，端到端跨进程共享队列有实测腿。**仍未完成**：X5b（batch / walkforward）、X0（`run_artifacts` 写入 + `/provenance`）、worker 领取执行的装配（本仓没有引擎）、鉴权（R5）、R8/R9 的代码落地、以及 `pkg/backtest` 侧的迁移（属 core，见 `docs/TASKS.md` 验收对照）。判据是「队列的 durable 形状已可运行，批量/前向/坐标三面还是空的」。

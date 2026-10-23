@@ -569,7 +569,7 @@ func TestReapExpiredRequeuesThenFails(t *testing.T) {
 		}
 	}
 	stored, _ = m.Get(context.Background(), job.ID)
-	if stored.Status != RunFailed || stored.ErrorMessage != attemptsExhaustedMessage || stored.Attempts != 3 {
+	if stored.Status != RunFailed || stored.ErrorMessage != AttemptsExhaustedMessage || stored.Attempts != 3 {
 		t.Fatalf("exhausted row must be failed/attempts_exhausted: %+v", stored)
 	}
 	if stored.ResultStatus != "" {

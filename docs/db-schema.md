@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-23
-verified-by: 施工 ①（QT-44：`run` schema DDL 落 `internal/queue/ddl.go`）
+verified-by: 施工 ③（run schema 已在真库执行；新增 request_canonical 字节锚点列）
 ---
 
 # DB Schema — tellurion-orchestration
@@ -18,11 +18,11 @@ verified-by: 施工 ①（QT-44：`run` schema DDL 落 `internal/queue/ddl.go`�
 
 | 表 | 内容 | 现状 |
 |---|---|---|
-| `run.backtest_jobs` | 任务队列（生命周期六态 + K9 `result_status` 两轴，见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.5） | DDL 已落（`internal/queue/ddl.go`）；内存实现可用，**未接 PG** |
+| `run.backtest_jobs` | 任务队列（生命周期六态 + K9 `result_status` 两轴，见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.5） | DDL 已落并**已接 PG**（`internal/pgstore` 的 `JobQueue` 实现 + 启动迁移） |
 | `run.walk_forward_reports` | 前向验证报告（`wf_id` + 逐窗 run 指针） | DDL 已落；功能未实现（X5b） |
 | `run.batch_runs` | 批量扫描批次 + 评分汇总 | DDL 已落；功能未实现（X5b） |
-| `run.run_artifacts` | 每次 run 的三 hash（`strategy_ref` / `dataset_snapshot_hash` / `risk_rules_hash`）+ artifact 指针 | DDL 已落；写入路径未实现（X0）；🔒 冻结面，变更须走评审 |
-| `run.worker_registry` | worker 注册与心跳（active / draining / offline） | DDL 已落（`internal/queue/ddl.go`）；内存注册表可用，**未接 PG** |
+| `run.run_artifacts` | 每次 run 的三 hash（`strategy_ref` / `dataset_snapshot_hash` / `risk_rules_hash`）+ artifact 指针 | DDL 已落（FK 生效已实测）；写入路径与读端点未实现（X0）；🔒 冻结面，变更须走评审 |
+| `run.worker_registry` | worker 注册与心跳（active / draining / offline） | DDL 已落并**已接 PG**（`internal/pgstore` 的 `WorkerRegistry` 实现） |
 | `quant.strategy_state`（不属本仓） | 运行状态检查点（断点续跑） | 归 strategy-runtime 模块 · core 写（2026-10-21 裁决，指 `tellurion:docs/design/system-spec-review-2026-10-21.md` H5） |
 
 > 🔒 **冻结标注**：`run_artifacts` 的三 hash 与 artifact 指针属 **ResultSpec 冻结 schema 面**（`tellurion:docs/SPEC.md` K9「ResultSpec 冻结」；内容寻址三兄弟见 `tellurion-contracts:docs/api-schema.md` §3）——增列 / 改口径 / 改 hash 算法都算改冻结面，**须走评审**（`tellurion:docs/TASKS.md`「维护本文件」的冻结 schema 变更评审硬规则），不得顺手改。
@@ -64,6 +64,7 @@ verified-by: 施工 ①（QT-44：`run` schema DDL 落 `internal/queue/ddl.go`�
   2. **版本化**：引入迁移库 + `schema_migrations` 表（可 down、有执行记录）——服务变多后更稳，但要一次性 baseline。
   **取向**：X1~X3 期间优先 ①（少一层依赖），服务数 ≥3 或出现"必须先降级"的需求时重估 ②。
   **落定（2026-10-23，施工 ①）：取取向 ①**。DDL 的唯一真相是 `internal/queue/ddl.go` 的 `migrations` 切片（`Migrations()` 只返副本）；本仓**不建** `migrations/*.sql` 可执行件——上面「迁移文件只放 `migrations/`」那条在本仓按此口径解释为「若将来改取向 ② 才启用」。切换取向 = 结构级变更，须走 ADR。
+  **执行入口落地（2026-10-23，施工 ③）**：`pgstore.Store.Migrate(ctx)` 按序执行该切片，`cmd/orchestrationservice` 在**监听之前**调用它；每条语句幂等（`IF NOT EXISTS`），可反复执行（测试里真跑两遍钉住）。首次真库落地时改了两处 DDL 原文（`request_canonical` 列 + 领取索引形状），因为当时**任何库里都还没有这套表**——追加 ALTER 是给已落库的语句用的。
 - **只前滚**：已合并的迁移不改；修错靠新增一条。
 - 每条必须可重入（`IF NOT EXISTS` / `IF EXISTS`），且能在空库上一次跑完。
 - 跨 schema 取数只走**只读视图或 API**；出现 `join` 别人的表就是边界腐化的第一信号。
@@ -73,11 +74,11 @@ verified-by: 施工 ①（QT-44：`run` schema DDL 落 `internal/queue/ddl.go`�
 
 > **本节只钉「表要回答什么、键怎么定」，列清单与类型在 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.5**（单一处维护，避免两份漂移）。落地前**不改库**；O0 按 §4 的机制建表。
 >
-> **现状（2026-10-23，施工 ①）**：五张表的 DDL 已按 §4 取向 ① 落在 `internal/queue/ddl.go`（含 6 条索引），逐条可重入；**尚未接 PG**（本仓没有数据库装配）。列与 §9.5 的对应关系由 `internal/queue/ddl_test.go` 钉住表数，列级核对在 §9.8 的验收腿里。
+> **现状（2026-10-23，施工 ③）**：五张表的 DDL 已按 §4 取向 ① 落在 `internal/queue/ddl.go`（含 7 条索引），逐条可重入，并**已在真库执行**（`pgstore.Migrate`，测试库 `tellurion_orchestration_test`）。列与 §9.5 的对应由 `internal/pgstore` 两条腿钉住：`TestMigrateIsIdempotentAndCreatesTheWholeSchema`（表数 / 索引形状）与 `TestJobColumnsMatchTheTableShape`（port 读的列 ⇄ 库有的列，双向）。
 
 | 表 | 目标主键 / 唯一键 | 关键语义 |
 |---|---|---|
-| `run.backtest_jobs` | `id`；`UNIQUE(idempotency_key) WHERE NOT NULL`；索引 `(status, priority DESC, created_at)` where `pending` | `request_json` 是完整 canonical RunSpec（worker 只执行这一份）；`status` 六态；`result_status` K9 三值可空；`worker_id` / `lease_until` / `attempts` / `cancel_requested` 支撑多 worker；`result_uri` 是结果指针；**目标无 `result` 内容列**（迁移期旧列保留只读，切读后删除） |
+| `run.backtest_jobs` | `id`；`UNIQUE(idempotency_key) WHERE NOT NULL`；索引 `(priority DESC, created_at ASC, id ASC) WHERE status='pending'` | `request_json` 是完整 canonical RunSpec 的 **JSONB 投影**（可查询），`request_canonical` 是同一份内容的 **TEXT 字节锚点**——`request_hash` 恒等于 `sha256(request_canonical)`，读路径回后者（JSONB 会把 `1e-05` 规范化成 `0.00001`，拿它复算 hash 会把同一个幂等键判成两次不同请求；实测钉子 `internal/pgstore/hashanchor_test.go`）；`status` 六态；`result_status` K9 三值可空；`worker_id` / `lease_until` / `attempts` / `cancel_requested` 支撑多 worker；`result_uri` 是结果指针；**目标无 `result` 内容列**（迁移期旧列保留只读，切读后删除） |
 | `run.run_artifacts` | `run_id` | 三 hash + `artifact_uri` 是冻结最小集；**无 `status`**（QT-63 ④）；`/provenance` 与本表 ⋈ `backtest_jobs` 取结论 |
 | `run.batch_runs` | `batch_id`；`UNIQUE(idempotency_key)` | 网格 + base RunSpec + 三值计数 + 排序汇总；不复制子结果 |
 | `run.walk_forward_reports` | `wf_id`；`UNIQUE(idempotency_key)` | 窗口配置 + 逐窗 run 指针 + 三值计数；部分失败显式计数 |

@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-23
-verified-by: X5a/X5c 落地 + 自审补登 R9（内核匹配缺口）
+verified-by: 施工 ③（PG 装配 / 启动迁移 / 周期租约回收已落；R8、R9 已裁待落地）
 ---
 
 # Dataflow — tellurion-orchestration
@@ -30,10 +30,14 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 
 ## 2. 关键时序
 
+**启动装配（施工 ③ 已落）**
+
+0. `cmd/orchestrationservice`：`-dsn` / `ORCHESTRATION_DSN`（两者都空即**拒绝启动**，不退回内存队列）→ `pgstore.Migrate()` 按序幂等执行 `queue.Migrations()` → **迁移成功后**才监听（`127.0.0.1:8088`）→ 周期任务按 `-reap-interval` 调 `ReapExpired`。半套表开始领活比启动失败难查得多。
+
 **提交 / 执行**
 
 1. `POST /api/runs/jobs` → 校验 `idempotency_key` + RunSpec（market→kernel 在**入队前**解析）→ 算 `request_hash` → 写 `run.backtest_jobs(status=pending)` → 返回 `job_id`。同键同 hash = 原 job（200），同键不同 hash = 409。
-2. worker 领取：原子 `pending → running` + `worker_id` + `lease_until`（`SKIP LOCKED` 或等价）；**worker 只执行行里的 `request_json`**，不从扁平列重建请求。
+2. worker 领取：原子 `pending → running` + `worker_id` + `lease_until`（PG 实现用 `FOR UPDATE SKIP LOCKED`，领取顺序 `priority DESC → created_at ASC → id ASC`，与内存实现的 tie-break 同形；施工 ③ 已落）；**worker 只执行行里的 `request_json`**，不从扁平列重建请求。
    - ⚠️ **内核匹配未实现**：目标口径是"只领 `kernels` 匹配的活"，但冻结的 `Claim(ctx, workerID, lease)` 没有内核参数，过滤放不进队列方法集（加参数 = MAJOR）——见 `ARCHITECTURE.md` §9.7 **R9**，倾向把过滤移到编排层（派活前查注册表）。今天 `WorkerRecord.Kernels` 只落库不消费。
 3. 执行期心跳续租（`RenewLease`）；引擎在**日循环之前**写输入身份（interim：core `quant.run_provenance`；O1：`run.run_artifacts`，双写/对拍/切读/停写）。
 4. 终态写一次：`Complete(result_status, result_uri)` 或 `Fail(error, result_status)`。`result_status` 是 K9 三值，和队列 `status` 是**两轴**（`ARCHITECTURE.md` §9.1 F8）；终态的每一行必须符合 §9.5 的**两轴映射表**（`invalid` → `status=completed` + `result_status=invalid`，`error` 为空；failed 时按是否产出 ResultSpec 传 `failed` 或空串）。
@@ -42,7 +46,7 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 **取消 / 回收 / 升级**
 
 6. `DELETE /api/runs/jobs/{id}`：`pending` → 直接 `cancelled`（保留行）；`running` → `cancelling` + `cancel_requested=true`；worker 看到后中止、`AckCancel` → `cancelled`。跨进程取消靠 DB，不靠内存 map。
-7. `ReapExpired`：租约过期 → `pending` 且 `attempts+1`；超过 `max_attempts` → `failed`（`attempts_exhausted`）。被回收的 worker 即使后来跑完，也因 `ErrLeaseLost` 写不进终态（fencing）。
+7. `ReapExpired`（由 `cmd` 的周期任务按 `-reap-interval` 调用）：租约过期 → `pending` 且 `attempts+1`；超过 `max_attempts` → `failed`（`attempts_exhausted`）。被回收的 worker 即使后来跑完，也因 `ErrLeaseLost` 写不进终态（fencing，PG 与内存两侧同形，实测腿 `ExpiredLeaseFencesTheOldOwner`）。⚠️ 只扫 `running`：`cancelling` 行的出口属 §9.7 R8（2026-10-23 已裁「同批落 `cancelled`」，代码在下一笔），裁决落地前 owner 崩溃会让该行停在中间态。
 8. 滚动升级：`POST /api/runs/workers/{id}/drain` → `active → draining` → 不再领新活 → 跑完手上的 → `offline`。
 
 **批量 / 前向**

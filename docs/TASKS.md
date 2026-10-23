@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-23
-verified-by: X5a/X5c + jobs HTTP 面落地 + 文档同步（QT-44 施工 ①②）
+verified-by: QT-44 施工 ①②③（③ = DDL 接 PG + 启动迁移）
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -26,6 +26,26 @@ verified-by: X5a/X5c + jobs HTTP 面落地 + 文档同步（QT-44 施工 ①②�
 >
 > **施工记录（2026-10-23，施工 ②）**：C 组**任务 4 端点**的 HTTP 面已在 `internal/httpapi` 落地（本单要求 ③ 的「取消端点」腿）——`POST`/`GET list`/`GET {id}`/`DELETE {id}`，行为按 `api-schema.md` §1/§2 冻结形状实现：202 提交 / 键序无关的 200 幂等重放（canonical 化在 queue 层实测）/ 409 `idempotency_conflict` / 429 `queue_full` / 400 `missing_idempotency_key`（在领域校验之前判，服务端不代生成键）/ 取消三态（`pending`→200 `cancelled`、`running`→202 `cancelling`、终态幂等 200 原状态）/ K9 `invalid` 以 `completed+invalid`、**error 为空**呈现（无效不是故障）。传输层口径四条（`total` 语义、鉴权缺位、`run_spec` 透传）见 `ARCHITECTURE.md` §9.8 施工 ② 小节。
 > 验收对照（本单 ⑤ 的三条判据，施工 ② 后的状态）：「`pkg/backtest` 零命中」与「同一 batch 新旧路径一致」都属 X5b 迁移，**未达成**；「provenance 端点返回三 hash」属 X0，**未达成**。本单整体**仍是 🔶**：X5b、X0、PG 装配、鉴权（R5）、R8/R9 待裁均未动。
+>
+> **施工记录（2026-10-23，施工 ③：工单 G7 第 1 步「DDL 接 PG + 启动迁移」）**：`run` schema 的 5 表 DDL 已**在真库执行**，两个 port 各有了第二个实现。
+> 落点：`internal/pgstore`（`Open` DSN 空即 fail-closed / `Migrate` 按序幂等 / `Queue` 的 `Claim` 用 `FOR UPDATE SKIP LOCKED` / `Registry` 的 UPSERT 保 status·started_at·drain 时刻）、`internal/qtest`（**共享语义套件** 29 条队列 + 6 条注册表 + 2 条跨 port，内存与 PG 各跑一遍——§9.8 那句「换 PG 实现时行为不变」只有共享用例才是可执行的）、`internal/testdb`、`cmd/orchestrationservice`（DSN → 迁移 → 监听 `127.0.0.1:8088` → 周期 `ReapExpired`）。依赖登记：`pgx v5.7.3` 先进 AGENTS.md §4 再进 `go.mod`，`internal/queue` 保持零第三方依赖。
+> **DDL 首次落库时改的两处原文**（当时任何库里都还没有这套表，追加 ALTER 是给已落库的语句用的）：① `backtest_jobs.request_canonical TEXT NOT NULL`——`request_hash` 的**字节锚点**；② 领取索引去掉键里冗余的 `status`、补第三键 `id`（与内存实现的 tie-break 同形），且 partial 谓词**不放** `lease_until`（冻结判据是「已释放**或**已过期」）。两处均已同步 `db-schema.md` §5 / `ARCHITECTURE.md` §9.5。
+> **四条实测换来的红（先红后修，不是设计时想到的）**：① `UPDATE…FROM(SELECT…FOR UPDATE SKIP LOCKED) RETURNING id,…` 里裸 `id` 是歧义列（42702）→ 列清单改由 `jobCols` 派生；② 同一参数既进 `CAST($4 AS jsonb)` 又进 TEXT 列时 PG 按 jsonb 定型，TEXT 列存进的是 **jsonb 的文本表示**（`{"a": 1}` 多一空格）→ 锚点当场失效，两处都显式 `::text`（同类问题在 worker UPSERT 的未类型化 NULL 上又红一次）；③ JSONB 把 `1e-05` 规范化成 `0.00001` ⇒ 拿 `request_json` 复算 hash 必然与 `request_hash` 不符，同一个幂等键会被判成两次不同请求——这是 ① 那条新列存在的全部理由，钉子 `hashanchor_test.go`；④ `go test ./...` **并行跑不同包**，两个包的 PG 腿共用一个测试库时 A 的清库删掉 B 正在断言的行（症状：重放莫名 202；单跑任一包永远绿）→ `internal/testdb` 用会话级 advisory lock 跨进程排队。
+> **破坏验证（施工 ③，三条腿各自红→逐字节还原→整包绿）**。每条都是「改坏应红」，还原后 sha256 与改前**逐字节相同**（`internal/pgstore/queue.go` = `c209005b…`、`internal/pgstore/store.go` = `64db894e…`，改前改后各比对一次）：
+> 1. **删掉 `Enqueue` 的 `pg_advisory_xact_lock`** → `TestPGSatisfiesJobQueueSuite/PG/ConcurrentQueueFullIsExact` 红：`round 0：深度 1 接受 12 行、拒 12 行（want 1 / 23）`；同批 `ConcurrentSameKeyYieldsOneRow` 也红（同键并发插入撞唯一索引后被错报成 `duplicate run id`）。⚠️ 这条腿**第一次跑时是绿的**——那时用例用「逐个 `go`」起跑，事务彼此错开、竞态窗口打不开，于是「护栏在」这个结论是假的；改成 barrier 起跑 + 3 轮后才有牙。教训如实登记：**破坏验证要先证明测试能被破坏**。
+> 2. **把读路径的 `request_canonical` 换成 JSONB 的 `request_json`**（拆掉 identity 锚点）→ 四条红：`TestCanonicalBytesSurviveTheJSONBRoundTrip`（`request bytes changed on round trip`）、`TestJobColumnsMatchTheTableShape`、套件的 `EnqueueReturnsCleanPendingRow`（`{"strategy": "momentum", ...}` 多出空格）与 `IdempotencyConflictSameKeyDifferentBody`。这条腿同时是 `request_canonical` 那列的**存在性证明**。
+> 3. **去掉 `Claim` 的租约谓词**（只留 `status='pending'`）→ `TestClaimPredicateSkipsARowWithAnUnreleasedLease` 红：把 `row-live`（租约在未来）派给了 worker，而按冻结判据它该拿 `row-expired`。
+>
+> 诚实登记覆盖面限制：`FOR UPDATE SKIP LOCKED` 的「**不阻塞**」这一半没有行为级用例——两个 worker 抢同一行时，带不带 `SKIP LOCKED` 都只影响排队与否，领取结果相同（并发不重发由 `FOR UPDATE` + 谓词保证，已被第 3 条腿与套件的 `ConcurrentClaimsHandOutDistinctRows` 钉住）。要测「不阻塞」只能造长时间持锁的开放事务并卡时间，属易碎断言，故不做，改为在实现注释里写明它的用途。
+> 本机 `-race` 跑不了（`CGO_ENABLED=0`、无 C 编译器，`go test -race` 直接 exit 2），并发结论来自 barrier 起跑的真库跑；CI 在 ubuntu 上跑同一条命令。
+
+
+> 验收对照（本单 ⑤ 三条判据，施工 ③ 后）：「`pkg/backtest` 零命中」与「同一 batch 新旧一致」**仍未达成**（属 X5b/迁移腿，且第一条不可能由本仓产出，见下）；「provenance 端点返回三 hash」仍未达成（属 X0）。整体仍 **🔶**。
+>
+> **⚠️ 工单 G7 的两条验收前提被源码证伪（2026-10-23 实测，如实登记，不当已完成）**：
+> 1. **「`pkg/backtest` 里 `job|batch|walkforward` 零命中」不是本仓能产出的判据**：core `pkg/backtest` 实测 **1032 处命中 / 39 个文件**（`job/job.go` 207、`batch/batch.go` 67、`walkforward/walkforward.go` 34、`aliases.go` 39…）。达成它要的是 core 侧 O3（`tellurion:docs/design/qt-decoupling/orchestration-service-design.md` §7「编排层整体移出 `pkg/backtest`」），而 R1 与本仓 `db-schema.md` §5 冻结的路径是「双写 → 对拍 → 切读 → 停写」——旧路径在 O0 切换前**必须继续服务**。本仓能做的是把 durable 侧与 port 做出来，不能单方面让别人的包变空。
+> 2. **「同一 batch 在服务与旧路径结果一致」与同一张工单的第 2 步自相矛盾**：core 的 batch 只要 `err == nil` 就记 `completed`、从不读 `resp.Status`（`core:pkg/backtest/batch/batch.go:249`），`toBacktestResult` 又把 status 字段丢掉（`:412-446`），于是 K9 `invalid` 被算进 `completed` / `success_count` / 评分均值；工单第 2 步又要求「批量报告不得把 `invalid` 当成功」。**修掉它的代价就是数字不再与旧路径相同**。本仓按「必须相同的部分（网格展开、窗口集合、逐 run 请求派生）钉一致，故意不同的部分（三值计数、失败窗口显式计数）钉分歧」执行，并在 X5b 的验收里逐条写明哪条是哪种。
+
 >
 > **M8 前置完成（2026-10-22）**：接口对表见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9。开工前先读 §9.1 的八条前置事实——`JobStore` **不是队列**（F1：`map[string]any` + `CreateJob` 直接起 goroutine + 内存 cancel）；异步请求**表达不了完整 RunSpec**：`commission_rate`/`slippage_rate` 落库后无读取点、策略 `params` 不被应用、`fill_timing` 缺位（F2）；无幂等键、无取消端点、`DELETE` 语义是删行（F3）；provenance 已落 `quant.run_provenance`，但 `run_artifacts` 与 `/api/runs/*` 零实现（F4）；batch 报告只在内存且把 K9 `invalid` 当成功（F5）；walkforward 直连 `*storage.PostgresStore`、请求缺参、逐窗失败静默消失（F6）；worker 注册/心跳/drain 零实现（F7）；**三 hash 是终态不变量、不是入队门槛**（F8）。本单当时**仍 ⬜**（对表是开工前置，不是实现）；R1~R7 未裁前 X5a/X5b/X5c/X0 各自阻塞。
 > 对表自检（2026-10-22，基线 `dbe4c68`）：71 条 `path:line`（core 69 + agent 2）按 HEAD 逐条命中；C 组 11 端点 / 14 错误码与 `api-schema.md` 双向一致；破坏验证三腿（改错行号 / 删一行端点 / 删一个错误码）各自红，还原后绿（文件 sha256 与改前相同）。
@@ -52,9 +72,9 @@ verified-by: X5a/X5c + jobs HTTP 面落地 + 文档同步（QT-44 施工 ①②�
 
 | 阶段 | 内容 | 上游单号 | 前置 |
 |---|---|---|---|
-| X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① 已落 `internal/queue`，施工 ② 已落 jobs 4 端点 HTTP 面；DDL 未接 PG） | `QT-44` | 本仓立项 |
+| X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① `internal/queue` 语义；② jobs 4 端点 HTTP 面；③ **DDL 已接 PG + 启动迁移 + 双实现共享用例**）| `QT-44` | 本仓立项 |
 | X5b | batch + walkforward（窗口切分与汇总） | `QT-44` | X5a |
-| X5c | worker 注册 / 心跳 / `drain` 🔶（施工 ① 已落 `internal/queue`） | `QT-44` | X5a |
+| X5c | worker 注册 / 心跳 / `drain` 🔶（施工 ① 内存；③ PG 已落；心跳超时→`offline` 仍未落） | `QT-44` | X5a |
 | X0 | `run_artifacts` 三 hash 留痕 + `/provenance` | `QT-03` | X5a |
 
 ## 二、跨仓指针（不在本仓，勿双写）

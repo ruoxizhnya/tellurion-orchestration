@@ -7,17 +7,29 @@ package queue
 //
 // 形状对表 docs/ARCHITECTURE.md §9.5；列口径对表 docs/db-schema.md §5。
 // 改表 = 先改文档（结构级变更还要 ADR），再改这里。
+//
+// 施工 ③（2026-10-23，DDL 首次落库）改动两条，都在「任何库里都还没有这套表」的
+// 窗口里改原文、而不是追加 ALTER（追加 ALTER 是给已落库的语句用的）：
+//   - `backtest_jobs.request_canonical`：identity 的**字节锚点**，见下面该表的注释；
+//   - 领取索引去掉键里冗余的 `status`（partial 谓词已经限定了它）。
 
 // migrations 只允许追加；已落库的语句不得改写（只前滚）。
 var migrations = []string{
 	`CREATE SCHEMA IF NOT EXISTS run`,
 
 	// run.backtest_jobs：任务队列（两轴状态：status 生命周期 / result_status K9）。
+	//
+	// `request_canonical` 是 identity 的**字节锚点**：`request_hash` 必须
+	// 恒等于 `sha256(request_canonical)`。`request_json` 仍是 JSONB（可查询），
+	// 但 JSONB 会规范化数字文本（`1e-05` 读回成 `0.00001`），拿它复算 hash 会把
+	// 同一个幂等键判成两次不同的请求——所以读路径回 `request_canonical`，
+	// 实测钉子见 `internal/pgstore/hashanchor_test.go`。
 	`CREATE TABLE IF NOT EXISTS run.backtest_jobs (
 		id                TEXT PRIMARY KEY,
 		idempotency_key   TEXT,
 		request_hash      CHAR(64) NOT NULL,
 		request_json      JSONB NOT NULL,
+		request_canonical TEXT NOT NULL,
 		status            TEXT NOT NULL DEFAULT 'pending'
 		                  CHECK (status IN ('pending','running','cancelling','completed','failed','cancelled')),
 		result_status     TEXT
@@ -37,9 +49,14 @@ var migrations = []string{
 	// 幂等键唯一；DB 允许 NULL 只为迁移存量行（API 层保证必填）。
 	`CREATE UNIQUE INDEX IF NOT EXISTS backtest_jobs_idempotency_key_uidx
 		ON run.backtest_jobs (idempotency_key) WHERE idempotency_key IS NOT NULL`,
-	// 领取顺序：priority 降序 → created_at 升序（PG 实现按此索引 SKIP LOCKED）。
+	// 领取顺序：priority 降序 → created_at 升序 → id 升序（PG 实现按此索引 SKIP LOCKED）。
+	// 谓词只限定 `status='pending'`：Claim 的冻结判据是「pending 且租约已释放**或**
+	// 已过期」（§9.2），把 `lease_until IS NULL` 写进 partial 谓词会让过期租约那一支
+	// 走不到这个索引。第三键 id 与内存实现的 tie-break 同形（同 priority 同 created_at
+	// 时两个实现必须领到同一条）。
 	`CREATE INDEX IF NOT EXISTS backtest_jobs_claim_idx
-		ON run.backtest_jobs (status, priority DESC, created_at ASC) WHERE status = 'pending'`,
+		ON run.backtest_jobs (priority DESC, created_at ASC, id ASC)
+		WHERE status = 'pending'`,
 	`CREATE INDEX IF NOT EXISTS backtest_jobs_worker_idx ON run.backtest_jobs (worker_id, status)`,
 	`CREATE INDEX IF NOT EXISTS backtest_jobs_created_idx ON run.backtest_jobs (created_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS backtest_jobs_result_status_idx ON run.backtest_jobs (result_status)`,
