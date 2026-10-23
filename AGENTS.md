@@ -6,9 +6,11 @@
 
 编排 / worker 服务：job / batch / walkforward 的算力出口，schema `run`。把"批量扫"从 core 进程里搬出来。
 
-**状态**：预留（S0 占位，触发式启动）——尚未启动，无实现
+**状态**：已启动（2026-10-23 施工 ①）——X5a/X5c 已落 `internal/queue`，X5b/X0 未做
 
-**今天的实现**：`core:pkg/backtest/batch` + `core:pkg/backtest/walkforward` + `backtest_jobs` / `walk_forward_reports` 表。
+**今天的实现**（本仓，2026-10-23）：`internal/queue` 的 `JobQueue` + `WorkerRegistry` 两个 port、内存实现（幂等键 + 租约 + 两轴状态 + `ReapExpired`）、`run` schema 5 表 DDL 常量。**未接 PG、无 HTTP 层**；细节见 `docs/ARCHITECTURE.md` §9.8。
+
+**迁出前的老实现**（core，待切读后停写）：`core:pkg/backtest/batch` + `core:pkg/backtest/walkforward` + `backtest_jobs` / `walk_forward_reports` 表。
 
 **不搬的**：`cmd/dualrun`（K15 双跑）**已裁决留 core**——它要同进程链接两个内核，且是引擎的验收门，不是本仓的 job。见 core [repo-inventory §3](https://github.com/ruoxizhnya/tellurion/blob/main/docs/design/qt-decoupling/repo-inventory.md)。
 
@@ -50,6 +52,8 @@ go test ./...
 |---|---|---|
 | `github.com/ruoxizhnya/tellurion-contracts` | 待定（S2 后 `v0.1.0`） | `RunSpec` / `ResultSpec` 只认契约 |
 | `github.com/ruoxizhnya/tellurion-kit` | 待定（S2 后 `v0.1.0`） | 日志 / HTTP / DB 连接 |
+
+> 今日 `go.mod` **零 require**：`internal/queue` 只用 stdlib（`database/sql` 的 DDL 文本是字符串常量，尚不建连接）。上表两项在真正引入前不动 `go.mod`。
 
 > 跨仓依赖**只认版本号**（伪版本或 tag），不认源码路径。契约变更走 `tellurion-contracts` 的发布，不走"顺手改一下"。
 

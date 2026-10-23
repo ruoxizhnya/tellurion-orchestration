@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-10-22
-verified-by: M8 接口对表（QT-44 前置 ②）
+last-verified: 2026-10-23
+verified-by: X5a/X5c 落地 + 文档同步（QT-44 施工 ①）
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -17,11 +17,13 @@ verified-by: M8 接口对表（QT-44 前置 ②）
 
 > **约定变更（2026-10-21）**：原「占位仓不写正式六字段任务单」作废——X 线任务单已展开为本仓正式任务（见下）。M5/M8 开工前置不变；实现仍未开工，开工前仍须过前置两条。
 
-### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] ⬜
+### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] 🔶
 
 > **迁入说明（2026-10-21）**：本单自 core 仓 `tellurion:docs/TASKS.md`「五、X 线」迁入（任务台账批量重分布：X 线单展开到各服务仓为正式六字段单，「占位仓不写正式任务单」旧约定同时作废）。六字段正文逐字保留、不改写；core 侧同号条目已改为指针。
 >
-> **M8 前置完成（2026-10-22）**：接口对表见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9。开工前先读 §9.1 的八条前置事实——`JobStore` **不是队列**（F1：`map[string]any` + `CreateJob` 直接起 goroutine + 内存 cancel）；异步请求**表达不了完整 RunSpec**：`commission_rate`/`slippage_rate` 落库后无读取点、策略 `params` 不被应用、`fill_timing` 缺位（F2）；无幂等键、无取消端点、`DELETE` 语义是删行（F3）；provenance 已落 `quant.run_provenance`，但 `run_artifacts` 与 `/api/runs/*` 零实现（F4）；batch 报告只在内存且把 K9 `invalid` 当成功（F5）；walkforward 直连 `*storage.PostgresStore`、请求缺参、逐窗失败静默消失（F6）；worker 注册/心跳/drain 零实现（F7）；**三 hash 是终态不变量、不是入队门槛**（F8）。本单**仍 ⬜**：对表是开工前置，不是实现；R1~R7 未裁前 X5a/X5b/X5c/X0 各自阻塞。
+> **施工记录（2026-10-23，施工 ①）**：X5a（`JobQueue` port + 状态机 + 幂等键）与 X5c（`WorkerRegistry` 注册 / 心跳 / `drain`）已在 `internal/queue` 落地——port 与方法级错误语义见 `ARCHITECTURE.md` §9.2，内存实现 + `run` schema 5 表 DDL 见 §9.8。**仍是 🔶**：X5b（batch / walkforward）、X0（`run_artifacts` 三 hash + `/provenance`）未做；DDL 未接 PG、无 HTTP 层；`cancelling` 行的租约回收出口待裁（§9.7 R8）。
+>
+> **M8 前置完成（2026-10-22）**：接口对表见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9。开工前先读 §9.1 的八条前置事实——`JobStore` **不是队列**（F1：`map[string]any` + `CreateJob` 直接起 goroutine + 内存 cancel）；异步请求**表达不了完整 RunSpec**：`commission_rate`/`slippage_rate` 落库后无读取点、策略 `params` 不被应用、`fill_timing` 缺位（F2）；无幂等键、无取消端点、`DELETE` 语义是删行（F3）；provenance 已落 `quant.run_provenance`，但 `run_artifacts` 与 `/api/runs/*` 零实现（F4）；batch 报告只在内存且把 K9 `invalid` 当成功（F5）；walkforward 直连 `*storage.PostgresStore`、请求缺参、逐窗失败静默消失（F6）；worker 注册/心跳/drain 零实现（F7）；**三 hash 是终态不变量、不是入队门槛**（F8）。本单当时**仍 ⬜**（对表是开工前置，不是实现）；R1~R7 未裁前 X5a/X5b/X5c/X0 各自阻塞。
 > 对表自检（2026-10-22，基线 `dbe4c68`）：71 条 `path:line`（core 69 + agent 2）按 HEAD 逐条命中；C 组 11 端点 / 14 错误码与 `api-schema.md` 双向一致；破坏验证三腿（改错行号 / 删一行端点 / 删一个错误码）各自红，还原后绿（文件 sha256 与改前相同）。
 
 - **① 目标**：批量扫描的算力出口独立成服务；`backtest_jobs` 归属迁出内核；三 hash 落 `run_artifacts`。
@@ -46,9 +48,9 @@ verified-by: M8 接口对表（QT-44 前置 ②）
 
 | 阶段 | 内容 | 上游单号 | 前置 |
 |---|---|---|---|
-| X5a | job 队列 + 状态机 + 幂等键 | `QT-44` | 本仓立项 |
+| X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① 已落 `internal/queue`，DDL 未接 PG） | `QT-44` | 本仓立项 |
 | X5b | batch + walkforward（窗口切分与汇总） | `QT-44` | X5a |
-| X5c | worker 注册 / 心跳 / `drain` | `QT-44` | X5a |
+| X5c | worker 注册 / 心跳 / `drain` 🔶（施工 ① 已落 `internal/queue`） | `QT-44` | X5a |
 | X0 | `run_artifacts` 三 hash 留痕 + `/provenance` | `QT-03` | X5a |
 
 ## 二、跨仓指针（不在本仓，勿双写）

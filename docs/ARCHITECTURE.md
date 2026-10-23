@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-10-22
-verified-by: M8 接口对表（QT-44 前置 ②）
+last-verified: 2026-10-23
+verified-by: 施工 ①（QT-44 X5a/X5c 语义落地，见 §9.8）
 ---
 
 # 架构 — tellurion-orchestration
@@ -69,9 +69,9 @@ tellurion-orchestration ──► core 引擎（派活）
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| X5a | job 队列 + 状态机 + 幂等 | ⬜ |
+| X5a | job 队列 + 状态机 + 幂等 | 🔶 语义定形（内存实现 + 单测）；PG 实现与 HTTP 面未落，见 §9.8 |
 | X5b | batch + walkforward | ⬜ |
-| X5c | worker 注册 / drain | ⬜ |
+| X5c | worker 注册 / drain | 🔶 注册 / 心跳 / drain 已落（内存）；心跳超时 → `offline` 的口径未定，见 §9.8 |
 | X0 | 三 hash 留痕（`run_artifacts`） | ⬜ |
 
 ## 9. 接口对表（M8 前置 · ✅ 2026-10-22）
@@ -267,3 +267,46 @@ type WorkerRegistry interface {
 | R5 | **鉴权与 worker 身份** | C 组全部端点未实现；worker_id 可伪造；`/api/runs/*` 与 QT-50 ④ 的鉴权矩阵未合流 | 与 QT-50 ④ 同一套 `unauthenticated` / `forbidden`；worker 注册必须带凭证（不能只报一个 id）；`drain` 只能由运维角色调用 |
 | R6 | **batch / walkforward 的子 run 关系** | 每个 task / 窗口都是独立 run，但 `run` schema 只有 5 张表；直接在 `backtest_jobs` 加 `parent_id` 会跨表引用两种父（batch / wf） | 二选一：(a) `run.run_children(parent_kind, parent_id, child_run_id)` 第六张表（结构变更走 ADR）；(b) 子 run 的 `request_json` 带 `parent` 元数据、父表存 `child_run_ids TEXT[]`。**倾向 (a)**：可查询、可加唯一约束 |
 | R7 | **队列深度与 `queue_full` 阈值** | 今天无上限（每 job 一个 goroutine）；429 语义在新端点冻结，但阈值是部署配置 | 契约只冻结「达上限 → 429 + `queue_full`」；默认值由部署配置给出（建议 `max_pending = worker 数 × 4`，压测后定），不进契约 |
+| R8 | **`cancelling` 行的租约回收出口**（2026-10-23 施工 ① 新登记） | §9.5 的 `ReapExpired` 只定义了 `running` 的回收：`cancelling` 行的 owner 若崩溃，`AckCancel` 因租约过期拒绝、`ReapExpired` 又不处理它——该行会永久停在中间态 | 二选一：(a) `ReapExpired` 同批把「`cancelling` 且租约过期」落 `cancelled`（与两轴映射表的 `cancelling → cancelled` 一致，**倾向**）；(b) 新增运维端点强制终态。定之前内存实现**不擅自补语义**（见 §9.8 取舍 4） |
+
+### 9.8 实现现状（2026-10-23，施工 ①）
+
+> 本节是给下一个 agent 的判据：只看本仓即可分辨「已落地」与「只是接口就位」。与 §9.5 冲突时以 §9.5 为准（那是冻结形状）。
+
+**落地包（`internal/queue`）**
+
+| 文件 | 内容 | 对应 |
+|---|---|---|
+| `model.go` | `RunStatus` 六态 / `ResultStatus` 三值 / `RunRecord` / `ListFilter` / `WorkerStatus` / `WorkerRecord` | §9.3 B 组 |
+| `ports.go` | `JobQueue`（10 方法）/ `WorkerRegistry`（4 方法）——方法集按 §9.6 冻结 | §9.2 A-1 |
+| `errors.go` | 8 个领域哨兵（wire code 归 HTTP 层，本包不定义） | §9.4 |
+| `hash.go` | `Canonicalize`（键排序 + 去空白 + 保留数字原文）/ `RequestHash` = sha256 | §9.5 `request_hash` |
+| `memory.go` | `JobQueue` 内存实现（幂等 / 领取 / 租约 / 两轴终态 / 取消 / 回收） | X5a |
+| `worker.go` | `WorkerRegistry` 内存实现（注册 / 心跳 / drain） | X5c |
+| `ddl.go` | `run` schema 5 表 + 6 索引；`Migrations()` 返副本 | §9.5 D 组、`db-schema.md` §5 |
+
+**能跑 / 只是接口就位**
+
+| 能力 | 现状 |
+|---|---|
+| 入队幂等（同键同 hash 重放 / 不同 hash 冲突 / 队列满） | ✅ 内存实现 + 单测 |
+| 原子领取（priority → created_at → id）+ 租约续期 | ✅ 内存实现 + 单测；PG 的 `SKIP LOCKED` **未落** |
+| 两轴终态（`completed+completed` / `completed+invalid` / `failed+failed` / `failed+NULL`） | ✅ 内存实现 + 单测 |
+| 取消（`pending`→`cancelled` 保留行；`running`→`cancelling`；owner `AckCancel`） | ✅ 内存实现 + 单测 |
+| 租约回收（`attempts+1` / `attempts_exhausted`） | ✅ 内存实现 + 单测 |
+| worker 注册 / 心跳 / drain（重复注册不洗回 `active`） | ✅ 内存实现 + 单测 |
+| `run` schema 建表 | ✅ DDL 落盘；**未接 PG**（本仓今天没有数据库装配） |
+| PG 版 `JobQueue`（`FOR UPDATE SKIP LOCKED`） | ⬜ 未实现——内存实现只保证语义，不保证多进程 |
+| 入队前「内核 / 市场可解析」校验（§9.4 fail-closed ①） | ⬜ 未实现（依赖 `EngineRegistry` / `MarketRouter`，本仓不引） |
+| `batch` / `walkforward` / `run_artifacts` / `/api/runs/*` HTTP 面 | ⬜ 未实现（X5b / X0 / C 组） |
+| worker 心跳超时 → `offline` | ⬜ 未实现（方法集冻结，无回收方法；补要新接口 = MAJOR，见 R8 同类问题） |
+
+**五条故意取舍**
+
+1. **DDL 用 Go 数组、不用 `migrations/*.sql`**：取向 ①（与 core 一致，运维零新增）；`Migrations()` 只返副本，已落库语句只前滚。
+2. **`Enqueue` 现算 `request_hash`**：调用方自带 hash 与 `request_json` 不符时直接 `ErrInvalidInput`——幂等判据不允许有两个来源。
+3. **`Complete` 不接受 `cancelling` 行**：取消一经请求结果即作废，worker 只能 `AckCancel`（两轴映射表里 `cancelling` 的唯一出口是 `cancelled`）。
+4. **`ReapExpired` 只扫 `running`**：`cancelling` 行在 owner 消失后没有出口，属 §9.5 未定义口径——**不擅自补语义**，登记为 R8。
+5. **`worker_id` 在回收后保留**：`pending` 行没有 owner，但留上一次 owner 便于审计；Claim 时覆盖。
+
+**自检结论**：单测层面成立；端到端不可用——没有 PG 装配、没有 HTTP 面、没有 worker 进程。判据是「X5a/X5c 语义已定形，落地未完成」。

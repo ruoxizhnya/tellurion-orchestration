@@ -1,6 +1,6 @@
 # tellurion-orchestration
 
-> module: `tellurion-orchestration` ｜ 状态：**预留（S0 占位，触发式启动）——尚未启动，无实现**（`cmd/dualrun` 已裁决留 core，不在本仓）
+> module: `tellurion-orchestration` ｜ 状态：**已启动（施工 ①）**——X5a/X5c 已落 `internal/queue`；X5b（batch/walkforward）与 X0（`run_artifacts`/`provenance`）未做（`cmd/dualrun` 已裁决留 core，不在本仓）
 
 编排 / worker 服务：job / batch / walkforward 的算力出口，schema `run`。把"批量扫"从 core 进程里搬出来。
 
@@ -8,9 +8,10 @@
 
 | 路径 | 内容 |
 |---|---|
+| `internal/queue/` | `JobQueue` / `WorkerRegistry` port + 内存实现 + `run` schema DDL（X5a/X5c） |
 | `docs/` | 本仓文档：台账 / 边界 / 决策 / 归档 —— 从这里进：`docs/README.md` |
 | `AGENTS.md` | 本仓入口（构建、边界、禁止、依赖版本） |
-| `doc.go` | 占位包（无实现） |
+| `doc.go` | 根包说明（实现按能力拆子包） |
 
 ## 快速开始
 

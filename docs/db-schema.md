@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-10-22
-verified-by: M8 接口对表（QT-44 前置 ②）
+last-verified: 2026-10-23
+verified-by: 施工 ①（QT-44：`run` schema DDL 落 `internal/queue/ddl.go`）
 ---
 
 # DB Schema — tellurion-orchestration
@@ -18,11 +18,11 @@ verified-by: M8 接口对表（QT-44 前置 ②）
 
 | 表 | 内容 | 现状 |
 |---|---|---|
-| `run.backtest_jobs` | 任务队列（生命周期六态 + K9 `result_status` 两轴，见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.5） | 从 core 的 `backtest_jobs`（无归属 schema）迁入 |
-| `run.walk_forward_reports` | 前向验证报告（`wf_id` + 逐窗 run 指针） | 从 core 迁入 |
-| `run.batch_runs` | 批量扫描批次 + 评分汇总 | 待建 |
-| `run.run_artifacts` | 每次 run 的三 hash（`strategy_ref` / `dataset_snapshot_hash` / `risk_rules_hash`）+ artifact 指针 | **待建（X0 载体）**；🔒 冻结面，变更须走评审 |
-| `run.worker_registry` | worker 注册与心跳（active / draining / offline） | 待建（多 worker 时） |
+| `run.backtest_jobs` | 任务队列（生命周期六态 + K9 `result_status` 两轴，见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.5） | DDL 已落（`internal/queue/ddl.go`）；内存实现可用，**未接 PG** |
+| `run.walk_forward_reports` | 前向验证报告（`wf_id` + 逐窗 run 指针） | DDL 已落；功能未实现（X5b） |
+| `run.batch_runs` | 批量扫描批次 + 评分汇总 | DDL 已落；功能未实现（X5b） |
+| `run.run_artifacts` | 每次 run 的三 hash（`strategy_ref` / `dataset_snapshot_hash` / `risk_rules_hash`）+ artifact 指针 | DDL 已落；写入路径未实现（X0）；🔒 冻结面，变更须走评审 |
+| `run.worker_registry` | worker 注册与心跳（active / draining / offline） | DDL 已落（`internal/queue/ddl.go`）；内存注册表可用，**未接 PG** |
 | `quant.strategy_state`（不属本仓） | 运行状态检查点（断点续跑） | 归 strategy-runtime 模块 · core 写（2026-10-21 裁决，指 `tellurion:docs/design/system-spec-review-2026-10-21.md` H5） |
 
 > 🔒 **冻结标注**：`run_artifacts` 的三 hash 与 artifact 指针属 **ResultSpec 冻结 schema 面**（`tellurion:docs/SPEC.md` K9「ResultSpec 冻结」；内容寻址三兄弟见 `tellurion-contracts:docs/api-schema.md` §3）——增列 / 改口径 / 改 hash 算法都算改冻结面，**须走评审**（`tellurion:docs/TASKS.md`「维护本文件」的冻结 schema 变更评审硬规则），不得顺手改。
@@ -63,6 +63,7 @@ verified-by: M8 接口对表（QT-44 前置 ②）
   1. **core 式**：Go 里的 `migrationStatements()` 数组 + 启动执行，幂等、无版本表——与 core 一致、运维零新增；
   2. **版本化**：引入迁移库 + `schema_migrations` 表（可 down、有执行记录）——服务变多后更稳，但要一次性 baseline。
   **取向**：X1~X3 期间优先 ①（少一层依赖），服务数 ≥3 或出现"必须先降级"的需求时重估 ②。
+  **落定（2026-10-23，施工 ①）：取取向 ①**。DDL 的唯一真相是 `internal/queue/ddl.go` 的 `migrations` 切片（`Migrations()` 只返副本）；本仓**不建** `migrations/*.sql` 可执行件——上面「迁移文件只放 `migrations/`」那条在本仓按此口径解释为「若将来改取向 ② 才启用」。切换取向 = 结构级变更，须走 ADR。
 - **只前滚**：已合并的迁移不改；修错靠新增一条。
 - 每条必须可重入（`IF NOT EXISTS` / `IF EXISTS`），且能在空库上一次跑完。
 - 跨 schema 取数只走**只读视图或 API**；出现 `join` 别人的表就是边界腐化的第一信号。
@@ -71,6 +72,8 @@ verified-by: M8 接口对表（QT-44 前置 ②）
 ## 5. 目标键与迁移（M8 接口对表，2026-10-22）
 
 > **本节只钉「表要回答什么、键怎么定」，列清单与类型在 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.5**（单一处维护，避免两份漂移）。落地前**不改库**；O0 按 §4 的机制建表。
+>
+> **现状（2026-10-23，施工 ①）**：五张表的 DDL 已按 §4 取向 ① 落在 `internal/queue/ddl.go`（含 6 条索引），逐条可重入；**尚未接 PG**（本仓没有数据库装配）。列与 §9.5 的对应关系由 `internal/queue/ddl_test.go` 钉住表数，列级核对在 §9.8 的验收腿里。
 
 | 表 | 目标主键 / 唯一键 | 关键语义 |
 |---|---|---|
