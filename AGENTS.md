@@ -8,7 +8,7 @@
 
 **状态**：已启动（2026-10-23 施工 ①）——X5a/X5c 已落 `internal/queue`，X5b/X0 未做
 
-**今天的实现**（本仓，2026-10-23）：`internal/queue` 的 `JobQueue` + `WorkerRegistry` 两个 port、内存实现（幂等键 + 租约 + 两轴状态 + `ReapExpired`）、`run` schema 5 表 DDL 常量。**未接 PG、无 HTTP 层**；细节见 `docs/ARCHITECTURE.md` §9.8。
+**今天的实现**（本仓，2026-10-23）：`internal/queue` 的 `JobQueue` + `WorkerRegistry` 两个 port、内存实现（幂等键 + 租约 + 两轴状态 + `ReapExpired`）、`run` schema 5 表 DDL 常量；`internal/httpapi` 的 jobs 4 端点（提交幂等 / 查询 / 取消 / 列表）。**未接 PG**；batch / walkforward / worker / provenance 端点未落；细节见 `docs/ARCHITECTURE.md` §9.8。
 
 **迁出前的老实现**（core，待切读后停写）：`core:pkg/backtest/batch` + `core:pkg/backtest/walkforward` + `backtest_jobs` / `walk_forward_reports` 表。
 

@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-23
-verified-by: X5a/X5c 落地 + 文档同步（QT-44 施工 ①）
+verified-by: X5a/X5c + jobs HTTP 面落地 + 文档同步（QT-44 施工 ①②）
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -23,6 +23,9 @@ verified-by: X5a/X5c 落地 + 文档同步（QT-44 施工 ①）
 >
 > **施工记录（2026-10-23，施工 ①）**：X5a（`JobQueue` port + 状态机 + 幂等键）与 X5c（`WorkerRegistry` 注册 / 心跳 / `drain`）已在 `internal/queue` 落地——port 与方法级错误语义见 `ARCHITECTURE.md` §9.2，内存实现 + `run` schema 5 表 DDL 见 §9.8。**仍是 🔶**：X5b（batch / walkforward）、X0（`run_artifacts` 三 hash + `/provenance`）未做；DDL 未接 PG、无 HTTP 层；`cancelling` 行的租约回收出口待裁（§9.7 R8）；按内核能力（`Kernels`）领取过滤在冻结的 `Claim` 上无法实现，待裁（§9.7 R9）。
 > 自审补正（2026-10-23，施工 ①）：① 重复注册不再重置 `started_at`（原实现把 worker 起始时间洗成重注册时刻，查不出存活时长）；② 两处实现加**编译期接口断言**（`Memory` 满足 `JobQueue` 全部 10 方法、`MemoryRegistry` 满足 `WorkerRegistry` 全部 4 方法）——方法集是冻结面，少一个方法就是实现方全红；③ §9.8 索引数订正为 7（原写 6）；④ 补 `List` 钳制的**实测**断言（原测试只有 5 行，区分不出「上限 100」与「默认 50」）。
+>
+> **施工记录（2026-10-23，施工 ②）**：C 组**任务 4 端点**的 HTTP 面已在 `internal/httpapi` 落地（本单要求 ③ 的「取消端点」腿）——`POST`/`GET list`/`GET {id}`/`DELETE {id}`，行为按 `api-schema.md` §1/§2 冻结形状实现：202 提交 / 键序无关的 200 幂等重放（canonical 化在 queue 层实测）/ 409 `idempotency_conflict` / 429 `queue_full` / 400 `missing_idempotency_key`（在领域校验之前判，服务端不代生成键）/ 取消三态（`pending`→200 `cancelled`、`running`→202 `cancelling`、终态幂等 200 原状态）/ K9 `invalid` 以 `completed+invalid`、**error 为空**呈现（无效不是故障）。传输层口径四条（`total` 语义、鉴权缺位、`run_spec` 透传）见 `ARCHITECTURE.md` §9.8 施工 ② 小节。
+> 验收对照（本单 ⑤ 的三条判据，施工 ② 后的状态）：「`pkg/backtest` 零命中」与「同一 batch 新旧路径一致」都属 X5b 迁移，**未达成**；「provenance 端点返回三 hash」属 X0，**未达成**。本单整体**仍是 🔶**：X5b、X0、PG 装配、鉴权（R5）、R8/R9 待裁均未动。
 >
 > **M8 前置完成（2026-10-22）**：接口对表见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9。开工前先读 §9.1 的八条前置事实——`JobStore` **不是队列**（F1：`map[string]any` + `CreateJob` 直接起 goroutine + 内存 cancel）；异步请求**表达不了完整 RunSpec**：`commission_rate`/`slippage_rate` 落库后无读取点、策略 `params` 不被应用、`fill_timing` 缺位（F2）；无幂等键、无取消端点、`DELETE` 语义是删行（F3）；provenance 已落 `quant.run_provenance`，但 `run_artifacts` 与 `/api/runs/*` 零实现（F4）；batch 报告只在内存且把 K9 `invalid` 当成功（F5）；walkforward 直连 `*storage.PostgresStore`、请求缺参、逐窗失败静默消失（F6）；worker 注册/心跳/drain 零实现（F7）；**三 hash 是终态不变量、不是入队门槛**（F8）。本单当时**仍 ⬜**（对表是开工前置，不是实现）；R1~R7 未裁前 X5a/X5b/X5c/X0 各自阻塞。
 > 对表自检（2026-10-22，基线 `dbe4c68`）：71 条 `path:line`（core 69 + agent 2）按 HEAD 逐条命中；C 组 11 端点 / 14 错误码与 `api-schema.md` 双向一致；破坏验证三腿（改错行号 / 删一行端点 / 删一个错误码）各自红，还原后绿（文件 sha256 与改前相同）。
@@ -49,7 +52,7 @@ verified-by: X5a/X5c 落地 + 文档同步（QT-44 施工 ①）
 
 | 阶段 | 内容 | 上游单号 | 前置 |
 |---|---|---|---|
-| X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① 已落 `internal/queue`，DDL 未接 PG） | `QT-44` | 本仓立项 |
+| X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① 已落 `internal/queue`，施工 ② 已落 jobs 4 端点 HTTP 面；DDL 未接 PG） | `QT-44` | 本仓立项 |
 | X5b | batch + walkforward（窗口切分与汇总） | `QT-44` | X5a |
 | X5c | worker 注册 / 心跳 / `drain` 🔶（施工 ① 已落 `internal/queue`） | `QT-44` | X5a |
 | X0 | `run_artifacts` 三 hash 留痕 + `/provenance` | `QT-03` | X5a |

@@ -69,7 +69,7 @@ tellurion-orchestration ──► core 引擎（派活）
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| X5a | job 队列 + 状态机 + 幂等 | 🔶 语义定形（内存实现 + 单测）；PG 实现与 HTTP 面未落，见 §9.8 |
+| X5a | job 队列 + 状态机 + 幂等 | 🔶 语义定形（内存实现 + 单测）+ jobs 4 端点 HTTP 面（施工 ②）；PG 实现未落，见 §9.8 |
 | X5b | batch + walkforward | ⬜ |
 | X5c | worker 注册 / drain | 🔶 注册 / 心跳 / drain 已落（内存）；心跳超时 → `offline` 的口径未定，见 §9.8 |
 | X0 | 三 hash 留痕（`run_artifacts`） | ⬜ |
@@ -286,6 +286,15 @@ type WorkerRegistry interface {
 | `worker.go` | `WorkerRegistry` 内存实现（注册 / 心跳 / drain） | X5c |
 | `ddl.go` | `run` schema 5 表 + 7 索引；`Migrations()` 返副本 | §9.5 D 组、`db-schema.md` §5 |
 
+**落地包（`internal/httpapi`，施工 ②）**
+
+| 文件 | 内容 | 对应 |
+|---|---|---|
+| `api.go` | jobs 4 端点（`POST`/`GET list`/`GET {id}`/`DELETE {id}`）+ 哨兵 → wire code 的 `classify` + 严格解码（拒未知字段 / 尾随内容 / 超 1 MiB） | §9.4 C 组「任务」表、`api-schema.md` §2 |
+| `api_test.go` | 12 条传输层单测：202 提交 / 键序无关的 200 重放 / 409 冲突 / 429 队列满 / 取消三态（200 cancelled、202 cancelling、终态幂等 200）/ K9 `invalid` 以 `completed+invalid` 呈现且 error 为空 / 列表过滤与 fail-closed | §9.4 |
+
+**传输层口径（施工 ②）**：① 缺幂等键 → 400 `missing_idempotency_key`，在领域校验**之前**判（fail-closed ②，服务端不代生成键）；② 列表的 `total` 是**钳制后本次返回的行数**（冻结方法集没有 Count 能力，全量命中数待 PG 实现裁决）；③ `unauthenticated` / `forbidden` 暂不产生（R5 鉴权未裁）；④ `run_spec` 以 `json.RawMessage` 原样入队（形状校验归引擎侧，本层只管 canonical 化 + hash）。
+
 **能跑 / 只是接口就位**
 
 | 能力 | 现状 |
@@ -300,7 +309,7 @@ type WorkerRegistry interface {
 | `run` schema 建表 | ✅ DDL 落盘；**未接 PG**（本仓今天没有数据库装配） |
 | PG 版 `JobQueue`（`FOR UPDATE SKIP LOCKED`） | ⬜ 未实现——内存实现只保证语义，不保证多进程 |
 | 入队前「内核 / 市场可解析」校验（§9.4 fail-closed ①） | ⬜ 未实现（依赖 `EngineRegistry` / `MarketRouter`，本仓不引） |
-| `batch` / `walkforward` / `run_artifacts` / `/api/runs/*` HTTP 面 | ⬜ 未实现（X5b / X0 / C 组） |
+| `batch` / `walkforward` / `run_artifacts` / 其余 C 组端点（batch / walkforward / worker / provenance） | ⬜ 未实现（X5b / X0）；jobs 4 端点已落（见上表） |
 | worker 心跳超时 → `offline` | ⬜ 未实现（方法集冻结，无回收方法；补要新接口 = MAJOR，见 R8 同类问题） |
 
 **六条故意取舍**
@@ -312,4 +321,4 @@ type WorkerRegistry interface {
 5. **`worker_id` 在回收后保留**：`pending` 行没有 owner，但留上一次 owner 便于审计；Claim 时覆盖。
 6. **`Kernels` 只落库不消费**：冻结的 `Claim` 没有内核参数，按能力过滤放不进队列方法集（加参数 = MAJOR）——登记为 R9，倾向把过滤移到编排层。
 
-**自检结论**：单测层面成立；端到端不可用——没有 PG 装配、没有 HTTP 面、没有 worker 进程。判据是「X5a/X5c 语义已定形，落地未完成」。
+**自检结论**：单测层面成立；端到端不可用——没有 PG 装配、没有 worker 进程，HTTP 面只有 jobs 4 端点（batch / walkforward / provenance / worker 端点未落）。判据是「X5a/X5c 语义已定形 + jobs 传输面已定形，落地未完成」。

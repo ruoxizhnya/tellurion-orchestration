@@ -6,7 +6,7 @@ verified-by: X5a/X5c 落地 + 文档同步
 
 # API Schema — tellurion-orchestration
 
-> **实现状态（2026-10-23）**：`internal/queue` 已落 `JobQueue` / `WorkerRegistry` 两个 **Go port** + 内存实现 + `run` schema DDL（X5a/X5c），但**没有任何 HTTP handler**——下列端点的传输层**仍未实现**。port 的方法级错误语义见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.2，实现现状见 §9.8。
+> **实现状态（2026-10-23，施工 ②）**：`internal/queue` 已落 `JobQueue` / `WorkerRegistry` 两个 **Go port** + 内存实现 + `run` schema DDL（X5a/X5c）；`internal/httpapi` 已落**任务 4 端点**（`POST`/`GET list`/`GET {id}`/`DELETE {id}`，§1「任务」表）——端点行为按 §2 的错误码与幂等语义实现，哨兵 → wire code 的映射在 `internal/httpapi/api.go` 的 `classify`。**仍未实现**：batch / walkforward / worker / provenance 端点（X5b / X0）；鉴权（R5 未裁，`unauthenticated` / `forbidden` 暂不产生）；PG 装配（port 方法语义以内存实现为参照，§9.8）。
 > 本文件是**目标契约**，不是现状说明书；开工顺序见 `docs/TASKS.md` 的「施工序」。
 > **请求 / 响应形状、状态机、幂等键与 `run` schema 的目标键**见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9（M8 接口对表）。本文件只钉**对外行为**（方法、路径、错误码、幂等），不重复字段表。
 
