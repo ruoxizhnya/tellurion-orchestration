@@ -63,7 +63,12 @@ type Memory struct {
 // 编译期断言：Memory 必须满足 JobQueue 的**全部**方法。
 // 方法集是冻结面（docs/ARCHITECTURE.md §9.6），少一个方法就是实现方全红——
 // 与其等到调用方编译失败，不如在这里钉住。
-var _ JobQueue = (*Memory)(nil)
+// KernelAwareJobQueue 是可选能力（R9 裁决）：它也断言在这里，因为本仓的两个实现
+// 都必须提供它，否则「按能力过滤」又变成只写在文档里的一句话。
+var (
+	_ JobQueue            = (*Memory)(nil)
+	_ KernelAwareJobQueue = (*Memory)(nil)
+)
 
 // NewMemory 构造内存队列。opts 最多取第一个非零项。
 func NewMemory(opts ...MemoryOptions) *Memory {
@@ -203,20 +208,37 @@ func (m *Memory) Enqueue(ctx context.Context, rec *RunRecord) (*RunRecord, bool,
 // workers 为 nil 时不校验注册表；非 nil 时**已注册且非 active** 的 worker 被拒
 // （未注册的 worker 不拒——单机装配允许不建注册表）。
 func (m *Memory) Claim(ctx context.Context, workerID string, lease time.Duration) (*RunRecord, error) {
+	return m.claim(ctx, workerID, lease, false)
+}
+
+// ClaimByKernel 见 KernelAwareJobQueue 的契约注释（R9 裁决的落点）：能力取自
+// worker **在注册表里声明的** Kernels，不是调用方现传的列表。
+func (m *Memory) ClaimByKernel(ctx context.Context, workerID string, lease time.Duration) (*RunRecord, error) {
+	return m.claim(ctx, workerID, lease, true)
+}
+
+// claim 是两个领取入口的共用体。byKernel = true 时把注册表里声明的能力用作过滤。
+func (m *Memory) claim(ctx context.Context, workerID string, lease time.Duration, byKernel bool) (*RunRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if workerID == "" || lease <= 0 {
 		return nil, fmt.Errorf("%w: worker_id and positive lease are required", ErrInvalidInput)
 	}
+	var declared []string
 	if m.workers != nil {
 		workers, err := m.workers.List(ctx)
 		if err != nil {
 			return nil, err
 		}
 		for _, w := range workers {
-			if w.WorkerID == workerID && w.Status != WorkerActive {
-				return nil, fmt.Errorf("%w: %s is %s", ErrWorkerDraining, workerID, w.Status)
+			if w.WorkerID == workerID {
+				if w.Status != WorkerActive {
+					return nil, fmt.Errorf("%w: %s is %s", ErrWorkerDraining, workerID, w.Status)
+				}
+				if byKernel {
+					declared = w.Kernels
+				}
 			}
 		}
 	}
@@ -227,6 +249,9 @@ func (m *Memory) Claim(ctx context.Context, workerID string, lease time.Duration
 	var best *RunRecord
 	for _, r := range m.jobs {
 		if r.Status != RunPending {
+			continue
+		}
+		if !MatchesKernels(declared, r.RequestJSON) {
 			continue
 		}
 		if best == nil || claimOrder(r, best) {
@@ -504,8 +529,15 @@ func (m *Memory) List(ctx context.Context, filter ListFilter) ([]*RunRecord, err
 	return out, nil
 }
 
-// ReapExpired 见 JobQueue 的契约注释。只处理 `running` 且租约已到期（含等于
-// now）的行；`worker_id` / `started_at` 保留，便于审计上一次 owner。
+// ReapExpired 见 JobQueue 的契约注释。处理两类行（R8 于 2026-10-23 裁决后扩展）：
+//
+//   - `running` 且租约已到期（含等于 now）：attempts+1，未超预算回 pending，
+//     超了落 failed + attempts_exhausted；
+//   - `cancelling` 且租约已到期：owner 已经消失，`AckCancel` 永远等不到，
+//     按两轴映射表落 `cancelled`。这类行**不**计 attempts——它不是重试，是给
+//     已作废的结果收尾（计入重试预算会把一次取消记成一次失败尝试）。
+//
+// 两类的 `worker_id` / `started_at` 都保留，便于审计上一次 owner。
 func (m *Memory) ReapExpired(ctx context.Context, now time.Time) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -522,15 +554,23 @@ func (m *Memory) ReapExpired(ctx context.Context, now time.Time) (int, error) {
 
 	reaped := 0
 	for _, r := range m.jobs {
-		if r.Status != RunRunning {
+		if r.Status != RunRunning && r.Status != RunCancelling {
 			continue
 		}
 		if r.LeaseUntil.IsZero() || at.Before(r.LeaseUntil) {
 			continue
 		}
+		reaped++
+		if r.Status == RunCancelling {
+			r.Status = RunCancelled
+			r.ResultStatus = ""
+			r.CancelRequested = true
+			r.CompletedAt = at
+			r.LeaseUntil = time.Time{}
+			continue
+		}
 		r.Attempts++
 		r.LeaseUntil = time.Time{}
-		reaped++
 		if r.Attempts >= r.MaxAttempts {
 			r.Status = RunFailed
 			r.ResultStatus = ""

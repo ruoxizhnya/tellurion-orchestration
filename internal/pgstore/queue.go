@@ -138,6 +138,14 @@ func (q *Queue) Enqueue(ctx context.Context, rec *queue.RunRecord) (*queue.RunRe
 // 第三键 id 是刻意的：同一 priority 同一 created_at 时，两个实现必须领到同一条。
 // FOR UPDATE SKIP LOCKED = 多 worker 并发领取的判据：别人锁着的行直接跳过，
 // 不排队也不互斥（排队会让两个 worker 各领一条变成串行等待）。
+//
+// $4 是 worker 声明的内核集合（R9）：传 NULL = 不过滤，所以冻结的 `Claim` 与可选的
+// `ClaimByKernel` 共用这一条语句、共用同一个顺序判据——两份 SQL 迟早会漂。
+//
+// 行的生效内核：**只有 JSON 字符串才算内核**，缺失 / null / 非字符串 / 空串 / 纯空白
+// 一律回默认（`queue.DefaultKernel`）。`jsonb_typeof(...) = 'string'` 那一层是必须的：
+// `->>` 对数字给的是它的 JSON 文本（`123`），而 Go 侧解不进 string 会按默认处理——
+// 少了这层 CASE，同一行在两个实现里的可领取性就不同。`btrim` 对 Go 的 TrimSpace。
 // claimSQL 是 var 而不是 const：RETURNING 列表由 jobCols 派生（见 store.go）。
 var claimSQL = `
 	UPDATE run.backtest_jobs AS j
@@ -146,6 +154,10 @@ var claimSQL = `
 		FROM (
 			SELECT id FROM run.backtest_jobs
 			WHERE status = 'pending' AND (lease_until IS NULL OR lease_until < $3)
+			  AND ($4::text[] IS NULL
+			       OR COALESCE(NULLIF(btrim(CASE WHEN jsonb_typeof(request_json -> 'kernel') = 'string'
+			                                     THEN request_json ->> 'kernel' END), ''),
+			                   '` + queue.DefaultKernel + `') = ANY ($4))
 			ORDER BY priority DESC, created_at ASC, id ASC
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
@@ -157,30 +169,56 @@ var claimSQL = `
 //
 // drain 校验口径与内存实现一致：**已注册且非 active** 才拒；未注册的 worker 不拒
 // （单机装配可以完全不建注册表）。
+//
+// 本方法**不按内核过滤**（§9.2 冻结面）；要过滤走 ClaimByKernel。
 func (q *Queue) Claim(ctx context.Context, workerID string, lease time.Duration) (*queue.RunRecord, error) {
+	return q.claim(ctx, workerID, lease, false)
+}
+
+// ClaimByKernel 见 KernelAwareJobQueue 的契约注释（§9.7 R9 裁决的落点）：
+// 能力取自 worker **在注册表里声明的** kernels，不是调用方现传的列表。
+func (q *Queue) ClaimByKernel(ctx context.Context, workerID string, lease time.Duration) (*queue.RunRecord, error) {
+	return q.claim(ctx, workerID, lease, true)
+}
+
+func (q *Queue) claim(ctx context.Context, workerID string, lease time.Duration, byKernel bool) (*queue.RunRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if workerID == "" || lease <= 0 {
 		return nil, fmt.Errorf("%w: worker_id and positive lease are required", queue.ErrInvalidInput)
 	}
+	var declared []string
 	if q.workers != nil {
+		// 一次查回 status + kernels：kernels 无论如何都读，避免「按不按下」分成
+		// 两条查询路径（drain 判据只有一条，两个入口必须同形）。
 		var status string
-		err := q.pool.QueryRow(ctx, `SELECT status FROM run.worker_registry WHERE worker_id = $1`, workerID).Scan(&status)
+		err := q.pool.QueryRow(ctx,
+			`SELECT status, kernels FROM run.worker_registry WHERE worker_id = $1`, workerID).
+			Scan(&status, &declared)
 		switch {
 		case err == nil:
 			if queue.WorkerStatus(status) != queue.WorkerActive {
 				return nil, fmt.Errorf("%w: %s is %s", queue.ErrWorkerDraining, workerID, status)
 			}
+			if !byKernel {
+				declared = nil
+			}
 		case errors.Is(err, pgx.ErrNoRows):
-			// 未注册：不拒（与 Memory.Claim 同口径）。
+			// 未注册：不拒、不过滤（与 Memory.Claim 同口径）。
+			declared = nil
 		default:
 			return nil, fmt.Errorf("pgstore: worker registry lookup: %w", err)
 		}
 	}
+	if len(declared) == 0 {
+		// 空声明 = 不过滤。DDL 的 `kernels TEXT[] DEFAULT '{}'` 给的是空数组而不是
+		// NULL，`= ANY('{}')` 恒假会把「没声明」读成「什么都不能干」。
+		declared = nil
+	}
 
 	at := timeNow()
-	row := q.pool.QueryRow(ctx, claimSQL, workerID, at.Add(lease), at)
+	row := q.pool.QueryRow(ctx, claimSQL, workerID, at.Add(lease), at, declared)
 	rec, err := rowToJob(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -433,7 +471,8 @@ func (q *Queue) List(ctx context.Context, filter queue.ListFilter) ([]*queue.Run
 //
 // 与内存实现的三条同形口径：
 //   - 判定是 `lease_until <= $1`（内存用 `!at.Before(lease)`，含等于）；
-//   - 只扫 `running`，`cancelling` 的出口待裁（§9.7 R8），两个实现都不擅自补；
+//   - `cancelling` 不在这条语句里，走 reapCancellingSQL（R8 于 2026-10-23 裁决后
+//     分开的第二条，见下）；
 //   - worker_id / started_at 保留（§9.8 取舍 5：留上次 owner 便于审计）。
 //
 // SKIP LOCKED 让多个 reaper 并发安全：别人正在写的行这次不碰，下次再来。
@@ -453,7 +492,33 @@ const reapSQL = `
 		FROM c
 		WHERE j.id = c.id`
 
-// ReapExpired 见 JobQueue 的契约注释，返回本次迁移的行数。
+// reapCancellingSQL 是 R8 的落点（§9.7，2026-10-23 裁决「同批落 cancelled」）：
+// owner 在 running 上被请求取消后消失，`AckCancel` 永远等不到，这行会停在中间态。
+// 两轴映射表里 `cancelling` 的唯一出口是 `cancelled`，所以回收替它收尾。
+//
+// 刻意**不**动 attempts：它不是重试，是给已作废的结果收尾——计入重试预算会把
+// 一次取消记成一次失败尝试（内存实现同口径，见 queue.Memory.ReapExpired）。
+// 拆成第二条语句而不是往 reapSQL 里塞 CASE：那条已测过的 running 语句保持原样，
+// R8 这条自成一格，读得出「两类迁移的判据不同」。
+const reapCancellingSQL = `
+	WITH c AS (
+		SELECT id FROM run.backtest_jobs
+		WHERE status = 'cancelling' AND lease_until IS NOT NULL AND lease_until <= $1
+		FOR UPDATE SKIP LOCKED
+	)
+	UPDATE run.backtest_jobs AS j
+		SET status = 'cancelled', result_status = NULL, cancel_requested = TRUE,
+		    completed_at = $1, lease_until = NULL
+		FROM c
+		WHERE j.id = c.id`
+
+// ReapExpired 见 JobQueue 的契约注释，返回本次迁移的行数（running 回收 +
+// cancelling 收尾两类之和）。
+//
+// 两条语句在**同一个事务**里：内存实现是在一把锁下改完两类行，要么都动要么都不动。
+// 分成两次 autocommit 就会出现「running 已回收、cancelling 那条失败」的半迁移态，
+// 而调用方只看到一个 error——重跑虽然能收尾（两条都是一方向、幂等的迁移），
+// 但返回值已经是错的了。事务里回滚 ⇒ 返回 0 + error，与「一行没动」同真。
 func (q *Queue) ReapExpired(ctx context.Context, now time.Time) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -462,9 +527,24 @@ func (q *Queue) ReapExpired(ctx context.Context, now time.Time) (int, error) {
 	if at.IsZero() {
 		at = timeNow()
 	}
-	tag, err := q.pool.Exec(ctx, reapSQL, at.UTC(), queue.AttemptsExhaustedMessage)
+	at = at.UTC()
+
+	reaped := 0
+	err := inTx(ctx, q.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, reapSQL, at, queue.AttemptsExhaustedMessage)
+		if err != nil {
+			return fmt.Errorf("pgstore: reap expired: %w", err)
+		}
+		reaped += int(tag.RowsAffected())
+		tag, err = tx.Exec(ctx, reapCancellingSQL, at)
+		if err != nil {
+			return fmt.Errorf("pgstore: reap orphaned cancelling: %w", err)
+		}
+		reaped += int(tag.RowsAffected())
+		return nil
+	})
 	if err != nil {
-		return 0, fmt.Errorf("pgstore: reap expired: %w", err)
+		return 0, err
 	}
-	return int(tag.RowsAffected()), nil
+	return reaped, nil
 }

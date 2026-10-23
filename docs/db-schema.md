@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-10-23
-verified-by: 施工 ③（run schema 已在真库执行；新增 request_canonical 字节锚点列）
+last-verified: 2026-10-24
+verified-by: 施工 ④（schema 无变更；`worker_registry.kernels` 的消费点已落）
 ---
 
 # DB Schema — tellurion-orchestration
@@ -82,7 +82,7 @@ verified-by: 施工 ③（run schema 已在真库执行；新增 request_canonic
 | `run.run_artifacts` | `run_id` | 三 hash + `artifact_uri` 是冻结最小集；**无 `status`**（QT-63 ④）；`/provenance` 与本表 ⋈ `backtest_jobs` 取结论 |
 | `run.batch_runs` | `batch_id`；`UNIQUE(idempotency_key)` | 网格 + base RunSpec + 三值计数 + 排序汇总；不复制子结果 |
 | `run.walk_forward_reports` | `wf_id`；`UNIQUE(idempotency_key)` | 窗口配置 + 逐窗 run 指针 + 三值计数；部分失败显式计数 |
-| `run.worker_registry` | `worker_id` | 能力（`kernels`）/ 心跳 / active → draining → offline；超时不删行 |
+| `run.worker_registry` | `worker_id` | 能力（`kernels`，施工 ④ 起由可选接口 `KernelAwareJobQueue.ClaimByKernel` 消费；空数组 = 不过滤，不是「什么都不能干」）/ 心跳 / active → draining → offline；超时不删行 |
 
 **迁移路径**（与 QT-63 ③-① 一致）：`backtest_jobs` / `walk_forward_reports` 双写 → 对拍 → 切读 → 停写；`quant.run_provenance` 由 `run.run_artifacts` 双写/对拍/切读/停写后取代。**子 run 关系**（batch / wf 的 task / window → `backtest_jobs` 行）待裁，见 `ARCHITECTURE.md` §9.7 R6，未定前不建第六张表。
 

@@ -6,9 +6,9 @@
 
 编排 / worker 服务：job / batch / walkforward 的算力出口，schema `run`。把"批量扫"从 core 进程里搬出来。
 
-**状态**：已启动（2026-10-23 施工 ①②③）——X5a/X5c 的语义（`JobQueue` + `WorkerRegistry` + `run` schema 5 表 DDL）已落 `internal/queue`，jobs 4 端点的 HTTP 面已落 `internal/httpapi`，**DDL 已接 PG 并有启动迁移**（`internal/pgstore` + `cmd/orchestrationservice`）。X5b（batch/walkforward）与 X0（`run_artifacts`/`provenance`）未做
+**状态**：已启动（2026-10-24 施工 ①②③④）——X5a/X5c 的语义（`JobQueue` + `WorkerRegistry` + `run` schema 5 表 DDL）已落 `internal/queue`，jobs 4 端点的 HTTP 面已落 `internal/httpapi`，**DDL 已接 PG 并有启动迁移**（`internal/pgstore` + `cmd/orchestrationservice`）；R8（`cancelling` 行的回收出口）与 R9（`Kernels` 的领取过滤）两条已裁事项**代码已落两个实现**。X5b（batch/walkforward）与 X0（`run_artifacts`/`provenance`）未做
 
-**今天的实现**（本仓，2026-10-23）：`internal/queue` 的两个 port + 内存实现 + DDL 常量；`internal/pgstore` 的 PG 实现（`Claim` 用 `FOR UPDATE SKIP LOCKED`、提交路径上一把 `pg_advisory_xact_lock` 让 `queue_full` 阈值在并发下精确）；`internal/qtest` 的**语义套件**（37 条用例，内存与 PG 各跑一遍——「换实现行为不变」这句判据只有共享用例才可执行）；`internal/testdb`（PG 腿跨进程排队）；`cmd/orchestrationservice`（DSN fail-closed → 迁移 → 监听 `:8088` → 周期 `ReapExpired`）。**未落**：batch / walkforward / worker / provenance 端点、worker 领取后的执行装配（引擎在 core，本仓不引）、鉴权（R5）；R8、R9 已于 2026-10-23 裁决但代码未落（下一笔）。细节见 `docs/ARCHITECTURE.md` §9.8。
+**今天的实现**（本仓，2026-10-24）：`internal/queue` 的两个 port + 可选接口 `KernelAwareJobQueue` + 内存实现 + DDL 常量；`internal/pgstore` 的 PG 实现（`Claim`/`ClaimByKernel` 共用**一条** `claimSQL`，`FOR UPDATE SKIP LOCKED`；提交路径上一把 `pg_advisory_xact_lock` 让 `queue_full` 阈值在并发下精确；回收是 running + cancelling 两条语句）；`internal/qtest` 的**语义套件**（每个实现 41 条用例 = 队列 30 + 注册表 6 + 跨 port 5，内存与 PG 各跑一遍——「换实现行为不变」这句判据只有共享用例才可执行）；`internal/testdb`（PG 腿跨进程排队）；`cmd/orchestrationservice`（DSN fail-closed → 迁移 → 监听 `:8088` → 周期 `ReapExpired`）。**未落**：batch / walkforward / worker / provenance 端点、worker 进程本身（所以 `ClaimByKernel` 目前只被套件与编译期断言消费）、鉴权（R5）。细节见 `docs/ARCHITECTURE.md` §9.8。
 
 **迁出前的老实现**（core，待切读后停写）：`core:pkg/backtest/batch` + `core:pkg/backtest/walkforward` + `backtest_jobs` / `walk_forward_reports` 表。
 

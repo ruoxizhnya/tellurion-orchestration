@@ -8,6 +8,7 @@ package queue
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -31,6 +32,53 @@ const (
 	ResultInvalid   ResultStatus = "invalid"
 	ResultFailed    ResultStatus = "failed"
 )
+
+// DefaultKernel 是 RunSpec.Kernel 为空时的生效内核名。
+//
+// 口径不在本仓发明：docs/dataflow.md §1 已冻结「`BacktestRequest.Kernel` 空 =
+// 默认 `go`，默认值不回填」——所以**读侧**要按这个默认解释，写侧不改请求。
+const DefaultKernel = "go"
+
+// KernelOf 取一份 canonical request_json 的生效内核名。
+//
+// 规则一句话：**只有 JSON 字符串才算内核**；缺失 / null / 非字符串（数字、布尔、
+// 对象）/ 空串 / 纯空白一律按 DefaultKernel。这条不是随手定的：PG 侧的抽取表达式
+// （`internal/pgstore.claimSQL`）用 `jsonb_typeof(...) = 'string'` 实现同一个规则，
+// 两侧必须逐字节同口径，否则同一行在内存里能被 w-go 领、在 PG 里领不到。
+//
+// 不报解析错误：能进队列的行已在 Enqueue 里过了 Canonicalize（非法 JSON 当场拒），
+// 解析失败只可能来自形状奇怪的行（`{"kernel":123}`、顶层数组）——按默认内核处理。
+func KernelOf(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return DefaultKernel
+	}
+	var probe struct {
+		Kernel string `json:"kernel"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return DefaultKernel
+	}
+	// 两侧同形：SQL 用 btrim()，这里用 TrimSpace（" go " 是同一个内核名）。
+	if k := strings.TrimSpace(probe.Kernel); k != "" {
+		return k
+	}
+	return DefaultKernel
+}
+
+// MatchesKernels 报告一行的生效内核是否在 worker 声明的能力集合里。
+// declared 为空（未声明能力）时**不过滤**——见 KernelAwareJobQueue 的口径。
+func MatchesKernels(declared []string, raw json.RawMessage) bool {
+	if len(declared) == 0 {
+		return true
+	}
+	want := KernelOf(raw)
+	for _, k := range declared {
+		if strings.TrimSpace(k) == want {
+			return true
+		}
+	}
+	return false
+}
 
 // ValidRunStatus 报告 s 是否是六态之一（含空串由调用方决定是否允许）。
 func ValidRunStatus(s RunStatus) bool {

@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-10-23
-verified-by: 施工 ③（PG 装配 / 启动迁移 / 周期租约回收已落；R8、R9 已裁待落地）
+last-verified: 2026-10-24
+verified-by: 施工 ④（PG 装配 / 启动迁移 / 周期租约回收已落；R8 的 `cancelling` 出口与 R9 的 `ClaimByKernel` 已落两个实现）
 ---
 
 # Dataflow — tellurion-orchestration
@@ -38,7 +38,7 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 
 1. `POST /api/runs/jobs` → 校验 `idempotency_key` + RunSpec（market→kernel 在**入队前**解析）→ 算 `request_hash` → 写 `run.backtest_jobs(status=pending)` → 返回 `job_id`。同键同 hash = 原 job（200），同键不同 hash = 409。
 2. worker 领取：原子 `pending → running` + `worker_id` + `lease_until`（PG 实现用 `FOR UPDATE SKIP LOCKED`，领取顺序 `priority DESC → created_at ASC → id ASC`，与内存实现的 tie-break 同形；施工 ③ 已落）；**worker 只执行行里的 `request_json`**，不从扁平列重建请求。
-   - ⚠️ **内核匹配未实现**：目标口径是"只领 `kernels` 匹配的活"，但冻结的 `Claim(ctx, workerID, lease)` 没有内核参数，过滤放不进队列方法集（加参数 = MAJOR）——见 `ARCHITECTURE.md` §9.7 **R9**，倾向把过滤移到编排层（派活前查注册表）。今天 `WorkerRecord.Kernels` 只落库不消费。
+   - **内核匹配已落（施工 ④，R9）**：`Claim` 仍不按内核过滤（§9.2 冻结面，加了就是 MAJOR）；过滤走**可选**接口 `KernelAwareJobQueue.ClaimByKernel`——它读 worker **在注册表里声明的** `kernels`，只领生效内核匹配的行；未注册、注册表未装配、或声明为空 ⇒ 不过滤（与「没登记不等于在 drain」同形）。行的生效内核：**只有 JSON 字符串才算内核**，缺键 / null / 数字 / 顶层非对象 / 空串一律按默认 `go`；两侧同口径的钉子是套件里 `ClaimByKernelReadsOnlyStringKernels`。⚠️ 消费方（真正按能力派活的 worker 进程）本仓还没有，所以今天这条过滤只被套件与编译期断言用到。
 3. 执行期心跳续租（`RenewLease`）；引擎在**日循环之前**写输入身份（interim：core `quant.run_provenance`；O1：`run.run_artifacts`，双写/对拍/切读/停写）。
 4. 终态写一次：`Complete(result_status, result_uri)` 或 `Fail(error, result_status)`。`result_status` 是 K9 三值，和队列 `status` 是**两轴**（`ARCHITECTURE.md` §9.1 F8）；终态的每一行必须符合 §9.5 的**两轴映射表**（`invalid` → `status=completed` + `result_status=invalid`，`error` 为空；failed 时按是否产出 ResultSpec 传 `failed` 或空串）。
 5. `GET /api/runs/jobs/{id}` 查生命周期 + 结果结论；`GET /api/runs/{id}/provenance` 是 `run_artifacts ⋈ backtest_jobs`，**不读** provenance 表里的 status（它没有 status）。
@@ -46,7 +46,7 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 **取消 / 回收 / 升级**
 
 6. `DELETE /api/runs/jobs/{id}`：`pending` → 直接 `cancelled`（保留行）；`running` → `cancelling` + `cancel_requested=true`；worker 看到后中止、`AckCancel` → `cancelled`。跨进程取消靠 DB，不靠内存 map。
-7. `ReapExpired`（由 `cmd` 的周期任务按 `-reap-interval` 调用）：租约过期 → `pending` 且 `attempts+1`；超过 `max_attempts` → `failed`（`attempts_exhausted`）。被回收的 worker 即使后来跑完，也因 `ErrLeaseLost` 写不进终态（fencing，PG 与内存两侧同形，实测腿 `ExpiredLeaseFencesTheOldOwner`）。⚠️ 只扫 `running`：`cancelling` 行的出口属 §9.7 R8（2026-10-23 已裁「同批落 `cancelled`」，代码在下一笔），裁决落地前 owner 崩溃会让该行停在中间态。
+7. `ReapExpired`（由 `cmd` 的周期任务按 `-reap-interval` 调用）两类迁移：**① `running`** 租约过期 → `pending` 且 `attempts+1`；超过 `max_attempts` → `failed`（`attempts_exhausted`）。被回收的 worker 即使后来跑完，也因 `ErrLeaseLost` 写不进终态（fencing，PG 与内存两侧同形，实测腿 `ExpiredLeaseFencesTheOldOwner`）。**② `cancelling`**（施工 ④，R8 裁决落地）租约过期 → `cancelled`，**不**计 attempts——owner 消失后 `AckCancel` 永远等不到，这行的唯一出口就是这里；`worker_id` 保留作审计。两侧同跑的钉子 `ReapLandsOrphanedCancellingRow`。
 8. 滚动升级：`POST /api/runs/workers/{id}/drain` → `active → draining` → 不再领新活 → 跑完手上的 → `offline`。
 
 **批量 / 前向**

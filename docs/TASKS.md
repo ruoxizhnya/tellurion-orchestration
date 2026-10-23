@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-10-23
-verified-by: QT-44 施工 ①②③（③ = DDL 接 PG + 启动迁移）
+last-verified: 2026-10-24
+verified-by: QT-44 施工 ①②③④（④ = R8 / R9 裁决落地，两个实现同批）
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -40,7 +40,23 @@ verified-by: QT-44 施工 ①②③（③ = DDL 接 PG + 启动迁移）
 > 本机 `-race` 跑不了（`CGO_ENABLED=0`、无 C 编译器，`go test -race` 直接 exit 2），并发结论来自 barrier 起跑的真库跑；CI 在 ubuntu 上跑同一条命令。
 
 
-> 验收对照（本单 ⑤ 三条判据，施工 ③ 后）：「`pkg/backtest` 零命中」与「同一 batch 新旧一致」**仍未达成**（属 X5b/迁移腿，且第一条不可能由本仓产出，见下）；「provenance 端点返回三 hash」仍未达成（属 X0）。整体仍 **🔶**。
+> **施工记录（2026-10-24，施工 ④：工单 G7 第 4 步「停下要裁决的」——R8 / R9 落地）**：两条 2026-10-23 已裁事项在**两个实现同批**落代码，不再是「已裁待落」。
+> **R8（`cancelling` 行的租约回收出口，裁 (a)）**：`ReapExpired` 现在做两类迁移——`running` 那类口径一字未改，新增「`cancelling` 且租约过期 → `cancelled`，**不**计 attempts」。内存侧是 `Memory.ReapExpired` 的一个分支（字段写法与 `AckCancel` 逐条同形：`status` / `result_status=""` / `cancel_requested` / `completed_at` / 释放租约）；PG 侧是 `reapCancellingSQL` 这条**独立语句**——没往 `reapSQL` 里塞 CASE，因为两条的判据本来就不同形（一条计 attempts、一条不计），合并只会让已测过的 running 语句背上新风险。两条语句套在**同一个事务**里（`inTx`）：内存实现是在一把锁下同时处理两类行，autocommit 分两次就会造出「running 已收、cancelling 失败」的半迁移态而调用方只看到一个 error；回滚后返回 `0 + error` 与「一行没动」同真。代价如实登记：**回滚腿没有用例**（要稳定让第二条语句失败只能改代码或造约束冲突，属易碎断言），且 `SKIP LOCKED` 在事务里的持锁窗口比 autocommit 略长——reaper 只跳不等的性质没变（两条语句的谓词互斥，且 reaper 从不 `FOR UPDATE` 等待别人的行）。
+> **R9（`Kernels` 的领取过滤，裁「加可选新接口 = MINOR」）**：`KernelAwareJobQueue.ClaimByKernel`（`internal/queue/ports.go`），冻结的 10 方法集一字未动（§9.6「新接口 = MINOR」第一次实际使用）。能力取 worker **在注册表里声明的** `Kernels`，不是调用方现传——否则声明仍然只落库。`Claim` 与 `ClaimByKernel` 在 PG 上**共用同一条 `claimSQL`**（多收一个 `$4::text[]`，传 NULL 即不过滤），在内存上共用 `claim(..., byKernel)`：两个入口的顺序、租约判据、drain 校验不可能各写各的。
+> **抽取规则是这轮唯一的"新发明"，且是被实测逼出来的**：`request_json` 里的 `kernel` **只有是 JSON 字符串才算内核**（缺键 / null / 数字 / 顶层非对象 / 空串 / 纯空白 = 默认 `go`）。第一版 SQL 只写了 `btrim` + `COALESCE`，实测两侧立刻分叉：`{"kernel":123}` 在 PG 里被 `->>` 读成文本 `123`（谁都领不走），在内存里解不进 `string` 按默认处理（`go` worker 能领走）。处置是 SQL 加一层 `jsonb_typeof(...) = 'string'` 的 CASE，Go 侧 `KernelOf` 补 `TrimSpace` 返回值（原来只用来判空、却把带空白的原值返回，`" go "` 在两侧含义不同）。规则本体写在 `queue.KernelOf` 的注释，SQL 是它的形。
+> **套件计数订正（我自己的旧账写错了）**：施工 ③ 记「29 + 6 + 2 = 37 条」——按 `go test -v` 实测 HEAD 是 **29 + 6 + 1 = 36**（跨 port 只有 1 条，不是 2）。施工 ④ 后是 **每个实现 41 条**（队列 30：`ReapIgnoresTerminalAndCancelling` 拆成 `ReapIgnoresTerminalRows` + `ReapLandsOrphanedCancellingRow`；跨 port 5：新增 `ClaimByKernelConsumesTheDeclaredCapabilities` / `ClaimByKernelReadsOnlyStringKernels` / `ClaimWithoutKernelFilterStaysUnfiltered` / `ClaimByKernelRejectsDrainingAndUnregisteredIsAllowed`）。教训：**数用例要数测试运行器的输出，不要手数文档里的数字**。
+> **破坏验证（施工 ④，五条腿各自红 → 逐字节还原 → 整包绿）**。还原用 sha256 比对（`internal/pgstore/queue.go` = `b6d1f555…`、`internal/queue/memory.go` = `519f0dd9…`，每条腿跑完都验一次还原相同）：
+> 1. **PG：撤掉 `reapCancellingSQL` 的 `cancelling` 那一支**（谓词改成 `'cancelling-LEG1-disabled'`，语句照样合法、事务照样跑）→ 只 `PG/ReapLandsOrphanedCancellingRow` 红：`suite.go:1272: reap after expiry = 0/<nil>, want 1/nil`。
+> 2. **PG：内核过滤器变空转**（`= ANY ($4)` 后补 `OR ($4 IS NOT NULL)`，$4 仍被引用所以语句照样合法）→ 只 `PG/ClaimByKernelConsumesTheDeclaredCapabilities` 红：`suite.go:185: w-go 第一次领取: claim = c8227c06…, want 054fc581…`（把 nautilus 行派给了 go worker）。另三条 pair 用例照绿，说明过滤器与冻结面确实是分开的两层。
+> 3. **PG：去掉 `jsonb_typeof='string'` 那层 CASE** → 只 `PG/ClaimByKernelReadsOnlyStringKernels` 红：`suite.go:235: claim 0 = …IdempotencyKey:k-null…`（该拿 `k-num`），证明那层 CASE 不是装饰。
+> 4. **Memory：丢掉 `MatchesKernels` 的结果** → 只 `Memory/ClaimByKernelConsumesTheDeclaredCapabilities` 红，同一行同一种错位（`claim = 1ae99fe7…, want 95e69a31…`）。
+> 5. **Memory：回收条件退回只看 `running`** → 只 `Memory/ReapLandsOrphanedCancellingRow` 红：`reap after expiry = 0/<nil>, want 1/nil`——与第 1 条**同一条用例同一句报错**，这就是「两侧同口径」的可执行形式。
+>
+> 诚实登记**未落**的部分：`ClaimByKernel` **没有生产消费方**——本仓没有 worker 进程（引擎在 core，红线禁止 import），所以今天用到它的只有共享套件与两个编译期断言；派活装配落地时必须做类型断言，不提供该接口的实现会**静默退回不过滤**（这条代价写在 §9.8 取舍 6）。`kernels` 空数组会被 `= ANY('{}')` 读成「什么都不能干」，实现里归一成 NULL 并在两条用例上钉住；`worker 心跳超时 → offline` 仍未落（方法集没有回收方法，同 R8 那类问题）。
+> 门禁：`gofmt -l .` 空 + `go build ./...` + `go vet ./...` + `go test ./... -count=1`（无 DSN，PG 腿 skip）与带 `ORCHESTRATION_TEST_DSN` 各跑一遍全绿；干净 worktree 复核见下。本机 `-race` 仍跑不了（`CGO_ENABLED=0`、无 C 编译器）。
+> 验收对照（本单 ⑤ 三条判据，施工 ④ 后）：「`pkg/backtest` 零命中」与「同一 batch 新旧一致」**仍未达成**（属 X5b/迁移腿，且第一条不可能由本仓产出，见下）；「provenance 端点返回三 hash」仍未达成（属 X0）。整体仍 **🔶**。
+
+
 >
 > **⚠️ 工单 G7 的两条验收前提被源码证伪（2026-10-23 实测，如实登记，不当已完成）**：
 > 1. **「`pkg/backtest` 里 `job|batch|walkforward` 零命中」不是本仓能产出的判据**：core `pkg/backtest` 实测 **1032 处命中 / 39 个文件**（`job/job.go` 207、`batch/batch.go` 67、`walkforward/walkforward.go` 34、`aliases.go` 39…）。达成它要的是 core 侧 O3（`tellurion:docs/design/qt-decoupling/orchestration-service-design.md` §7「编排层整体移出 `pkg/backtest`」），而 R1 与本仓 `db-schema.md` §5 冻结的路径是「双写 → 对拍 → 切读 → 停写」——旧路径在 O0 切换前**必须继续服务**。本仓能做的是把 durable 侧与 port 做出来，不能单方面让别人的包变空。
@@ -72,7 +88,7 @@ verified-by: QT-44 施工 ①②③（③ = DDL 接 PG + 启动迁移）
 
 | 阶段 | 内容 | 上游单号 | 前置 |
 |---|---|---|---|
-| X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① `internal/queue` 语义；② jobs 4 端点 HTTP 面；③ **DDL 已接 PG + 启动迁移 + 双实现共享用例**）| `QT-44` | 本仓立项 |
+| X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① `internal/queue` 语义；② jobs 4 端点 HTTP 面；③ **DDL 已接 PG + 启动迁移 + 双实现共享用例**；④ R8 回收出口 + R9 `ClaimByKernel` 落两个实现）| `QT-44` | 本仓立项 |
 | X5b | batch + walkforward（窗口切分与汇总） | `QT-44` | X5a |
 | X5c | worker 注册 / 心跳 / `drain` 🔶（施工 ① 内存；③ PG 已落；心跳超时→`offline` 仍未落） | `QT-44` | X5a |
 | X0 | `run_artifacts` 三 hash 留痕 + `/provenance` | `QT-03` | X5a |

@@ -150,6 +150,158 @@ func PairCases() []PairCase {
 				}
 			},
 		},
+		{
+			Name: "ClaimByKernelConsumesTheDeclaredCapabilities",
+			Run: func(t *testing.T, p Pair) {
+				ctx := ctxT(t)
+				// §9.7 R9（2026-10-23 裁决 = 可选新接口，MINOR）：
+				// `WorkerRecord.Kernels` 从「只落库不消费」变成领取过滤器。
+				kq := kernelAware(t, p.Jobs)
+				if err := p.Workers.Register(ctx, queue.WorkerRecord{WorkerID: "w-go", Kernels: []string{"go"}}); err != nil {
+					t.Fatal(err)
+				}
+				if err := p.Workers.Register(ctx, queue.WorkerRecord{WorkerID: "w-nautilus", Kernels: []string{"nautilus"}}); err != nil {
+					t.Fatal(err)
+				}
+				// created_at 递增 = 领取顺序里 nautilus 行**最靠前**：w-go 领到别的
+				// 行只可能是过滤的结果，不是排序的巧合（否则这条用例是假护栏）。
+				naut := enqueue(t, p.Jobs, "k-naut", `{"kernel":"nautilus"}`, at(1))
+				dflt := enqueue(t, p.Jobs, "k-dflt", `{"a":1}`, at(2))
+				explicit := enqueue(t, p.Jobs, "k-go", `{"kernel":"go"}`, at(3))
+				empty := enqueue(t, p.Jobs, "k-empty", `{"kernel":""}`, at(4))
+
+				want := func(what string, got *queue.RunRecord, expect *queue.RunRecord) *queue.RunRecord {
+					t.Helper()
+					if got == nil {
+						t.Fatalf("%s: claim = nil, want %s", what, expect.ID)
+					}
+					if got.ID != expect.ID {
+						t.Fatalf("%s: claim = %s, want %s", what, got.ID, expect.ID)
+					}
+					return got
+				}
+
+				// 缺 kernel 键 = 默认内核 go（dataflow §1「默认值不回填」是读侧口径）。
+				first := want("w-go 第一次领取", mustClaimKernel(t, kq, "w-go"), dflt)
+				if first.WorkerID != "w-go" || first.Status != queue.RunRunning {
+					t.Fatalf("claimed row = %+v", first)
+				}
+				// 被跳过的那一行必须原样留在队列里，不能悄悄贴上别的 owner。
+				if left := mustGet(t, p.Jobs, naut.ID); left.Status != queue.RunPending || left.WorkerID == "w-go" {
+					t.Fatalf("skipped row was touched: %+v", left)
+				}
+				want("w-nautilus 领取", mustClaimKernel(t, kq, "w-nautilus"), naut)
+				want("w-go 第二次领取", mustClaimKernel(t, kq, "w-go"), explicit)
+				// 只剩内核为 `""` 的行：nautilus worker 依旧领不到。
+				if got, err := kq.ClaimByKernel(ctx, "w-nautilus", time.Minute); err != nil || got != nil {
+					t.Fatalf("w-nautilus claim on the last (default-kernel) row = %+v/%v, want nil/nil", got, err)
+				}
+				want("空串内核按默认解释", mustClaimKernel(t, kq, "w-go"), empty)
+				if got, err := kq.ClaimByKernel(ctx, "w-go", time.Minute); err != nil || got != nil {
+					t.Fatalf("exhausted queue = %+v/%v, want nil/nil", got, err)
+				}
+			},
+		},
+		{
+			Name: "ClaimByKernelReadsOnlyStringKernels",
+			Run: func(t *testing.T, p Pair) {
+				ctx := ctxT(t)
+				// 生效内核的抽取规则两侧必须逐字节同口径（queue.KernelOf 的注释
+				// 是规则本体，pgstore.claimSQL 的 CASE 是它的 SQL 形）。
+				// 「非字符串 = 默认」不是洁癖：`->>` 对数字给的是它的 JSON 文本，
+				// Go 侧解不进 string，少写一层判断就会出现同一行一边能领一边不能。
+				kq := kernelAware(t, p.Jobs)
+				if err := p.Workers.Register(ctx, queue.WorkerRecord{WorkerID: "w-go", Kernels: []string{"go"}}); err != nil {
+					t.Fatal(err)
+				}
+				if err := p.Workers.Register(ctx, queue.WorkerRecord{WorkerID: "w-nautilus", Kernels: []string{"nautilus"}}); err != nil {
+					t.Fatal(err)
+				}
+				// 四条按 created_at 递增：w-go 必须**按这个顺序**领完它们。
+				weird := []*queue.RunRecord{
+					enqueue(t, p.Jobs, "k-num", `{"kernel":123}`, at(1)),
+					enqueue(t, p.Jobs, "k-null", `{"kernel":null}`, at(2)),
+					enqueue(t, p.Jobs, "k-array", `["not-an-object"]`, at(3)),
+					enqueue(t, p.Jobs, "k-pad", `{"kernel":" go "}`, at(4)),
+				}
+				naut := enqueue(t, p.Jobs, "k-naut", `{"kernel":"nautilus"}`, at(5))
+
+				for i, want := range weird {
+					got, err := kq.ClaimByKernel(ctx, "w-go", time.Minute)
+					if err != nil {
+						t.Fatalf("claim %d: %v", i, err)
+					}
+					if got == nil || got.ID != want.ID {
+						t.Fatalf("claim %d = %+v, want %s（这一行的内核不是字符串，应按默认 %q 解释）",
+							i, got, want.ID, queue.DefaultKernel)
+					}
+				}
+				// 四条都领完了，nautilus 行还该在原处等它的 worker。
+				if left := mustGet(t, p.Jobs, naut.ID); left.Status != queue.RunPending {
+					t.Fatalf("nautilus row taken by a go worker: %+v", left)
+				}
+				if got, err := kq.ClaimByKernel(ctx, "w-nautilus", time.Minute); err != nil || got == nil || got.ID != naut.ID {
+					t.Fatalf("w-nautilus claim = %+v/%v, want %s", got, err, naut.ID)
+				}
+			},
+		},
+		{
+			Name: "ClaimWithoutKernelFilterStaysUnfiltered",
+			Run: func(t *testing.T, p Pair) {
+				ctx := ctxT(t)
+				// 冻结的 `Claim` 一个字没动（§9.6：改签名 = MAJOR）。
+				// 能力过滤只长在可选接口上，所以注册了 kernels 的 worker
+				// 走 Claim 时**照旧**按 claim 顺序领取，哪怕那活它声明干不了。
+				if err := p.Workers.Register(ctx, queue.WorkerRecord{WorkerID: "w-go", Kernels: []string{"go"}}); err != nil {
+					t.Fatal(err)
+				}
+				naut := enqueue(t, p.Jobs, "k-naut", `{"kernel":"nautilus"}`, at(1))
+				mine := enqueue(t, p.Jobs, "k-go", `{"kernel":"go"}`, at(2))
+
+				got, err := p.Jobs.Claim(ctx, "w-go", time.Minute)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got == nil || got.ID != naut.ID {
+					t.Fatalf("frozen Claim = %+v, want the first row %s (no kernel filter)", got, naut.ID)
+				}
+				// 未声明能力（kernels 为空）的 worker 走可选接口同样不过滤：
+				// 「没登记能力」不等于「什么都不能干」，与 drain 那条同口径。
+				if err := p.Workers.Register(ctx, queue.WorkerRecord{WorkerID: "w-any"}); err != nil {
+					t.Fatal(err)
+				}
+				kq := kernelAware(t, p.Jobs)
+				got2, err := kq.ClaimByKernel(ctx, "w-any", time.Minute)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got2 == nil || got2.ID != mine.ID {
+					t.Fatalf("undeclared worker = %+v, want %s", got2, mine.ID)
+				}
+			},
+		},
+		{
+			Name: "ClaimByKernelRejectsDrainingAndUnregisteredIsAllowed",
+			Run: func(t *testing.T, p Pair) {
+				ctx := ctxT(t)
+				kq := kernelAware(t, p.Jobs)
+				// drain 判定与 Claim 同形：不因为换了入口就放过 draining worker。
+				if err := p.Workers.Register(ctx, queue.WorkerRecord{WorkerID: "w1", Kernels: []string{"go"}}); err != nil {
+					t.Fatal(err)
+				}
+				enqueue(t, p.Jobs, "k-drain", `{"a":1}`, at(1))
+				if err := p.Workers.Drain(ctx, "w1"); err != nil {
+					t.Fatal(err)
+				}
+				_, err := kq.ClaimByKernel(ctx, "w1", time.Minute)
+				mustErr(t, err, queue.ErrWorkerDraining, "ClaimByKernel by a draining worker")
+
+				// 未注册的 worker 不拒（单机装配可以不建注册表，同 Claim 口径）。
+				if got, err := kq.ClaimByKernel(ctx, "w-ghost", time.Minute); err != nil || got == nil {
+					t.Fatalf("ClaimByKernel by an unregistered worker = %+v/%v, want a row/nil", got, err)
+				}
+			},
+		},
 	}
 }
 
@@ -200,6 +352,27 @@ func claim(t *testing.T, q queue.JobQueue, worker string, lease time.Duration) *
 	job, err := q.Claim(ctxT(t), worker, lease)
 	if err != nil {
 		t.Fatalf("Claim(%s): %v", worker, err)
+	}
+	return job
+}
+
+// kernelAware 探测可选能力接口（R9 的落点）。断言不过就是实现漏了能力声明，
+// 这比让用例去调一个不存在的方法更适合当报错：套件里能直接看出是哪一侧红的。
+func kernelAware(t *testing.T, q queue.JobQueue) queue.KernelAwareJobQueue {
+	t.Helper()
+	kq, ok := q.(queue.KernelAwareJobQueue)
+	if !ok {
+		t.Fatalf("%T does not implement queue.KernelAwareJobQueue (§9.7 R9: Kernels 要真的被消费)", q)
+	}
+	return kq
+}
+
+// mustClaimKernel 走可选接口领取一条；出错即 fatal。
+func mustClaimKernel(t *testing.T, kq queue.KernelAwareJobQueue, worker string) *queue.RunRecord {
+	t.Helper()
+	job, err := kq.ClaimByKernel(ctxT(t), worker, time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimByKernel(%s): %v", worker, err)
 	}
 	return job
 }
@@ -1030,30 +1203,98 @@ func JobQueueSpecCases() []SpecCase {
 			},
 		},
 		{
-			Name: "ReapIgnoresTerminalAndCancelling",
+			Name: "ReapIgnoresTerminalRows",
 			Spec: Spec{DefaultMaxAttempts: 3},
 			Run: func(t *testing.T, q queue.JobQueue) {
-				// ReapExpired 只处理 running。**cancelling 行的租约回收出口未裁**
-				// （§9.7 R8：owner 崩溃后这行停在中间态），两个实现都不得擅自补语义。
+				// 三条终态出口（completed / failed / cancelled）都不许被回收碰。
+				// 旧用例叫 ReapIgnoresTerminalAndCancelling：`cancelling` 那一半
+				// 在 2026-10-23 的 R8 裁决后不再成立，拆成两条（另一条见下）。
 				done := enqueue(t, q, "k-done", `{"a":1}`, at(1))
 				claim(t, q, "w1", time.Minute)
 				if err := q.Complete(ctxT(t), done.ID, "w1", "completed", "mem://done"); err != nil {
 					t.Fatal(err)
 				}
-				cancel := enqueue(t, q, "k-cancel", `{"a":2}`, at(2))
+				broken := enqueue(t, q, "k-broken", `{"a":2}`, at(2))
 				claim(t, q, "w2", time.Minute)
-				if err := q.RequestCancel(ctxT(t), cancel.ID); err != nil {
+				if err := q.Fail(ctxT(t), broken.ID, "w2", "boom", "failed"); err != nil {
 					t.Fatal(err)
 				}
+				// pending 行直接取消：终态 cancelled，且从未有过租约。
+				quit := enqueue(t, q, "k-quit", `{"a":3}`, at(3))
+				if err := q.RequestCancel(ctxT(t), quit.ID); err != nil {
+					t.Fatal(err)
+				}
+
 				n, err := q.ReapExpired(ctxT(t), future())
 				if err != nil {
 					t.Fatal(err)
 				}
 				if n != 0 {
-					t.Fatalf("reap touched %d rows; terminal and cancelling are out of scope (R8 未裁)", n)
+					t.Fatalf("reap touched %d terminal rows, want 0", n)
 				}
-				if got := mustGet(t, q, cancel.ID); got.Status != queue.RunCancelling || got.Attempts != 0 {
-					t.Fatalf("cancelling row was modified: %+v", got)
+				for _, id := range []string{done.ID, broken.ID, quit.ID} {
+					row := mustGet(t, q, id)
+					if !row.Terminal() {
+						t.Fatalf("%s left terminal state: %+v", id, row)
+					}
+				}
+				if got := mustGet(t, q, done.ID); got.Attempts != 0 || got.ResultStatus != queue.ResultCompleted {
+					t.Fatalf("completed row was modified: %+v", got)
+				}
+				if got := mustGet(t, q, broken.ID); got.Attempts != 0 || got.ErrorMessage != "boom" {
+					t.Fatalf("failed row was modified: %+v", got)
+				}
+			},
+		},
+		{
+			Name: "ReapLandsOrphanedCancellingRow",
+			Spec: Spec{DefaultMaxAttempts: 3},
+			Run: func(t *testing.T, q queue.JobQueue) {
+				// §9.7 R8（2026-10-23 裁决：同批落 cancelled）。owner 在
+				// running 上被请求取消后崩溃，`AckCancel` 就永远等不到——
+				// 两轴映射表里 `cancelling` 的唯一出口是 `cancelled`，
+				// 回收是它唯一的落地路径。**不计 attempts**：它不是重试。
+				job := enqueue(t, q, "k-orphan", `{"a":1}`, at(1))
+				claim(t, q, "w1", time.Minute)
+				if err := q.RequestCancel(ctxT(t), job.ID); err != nil {
+					t.Fatal(err)
+				}
+				// 未到期不动（与 running 同一条谓词）。
+				if n, err := q.ReapExpired(ctxT(t), past()); err != nil || n != 0 {
+					t.Fatalf("reap before expiry = %d/%v, want 0/nil", n, err)
+				}
+				if got := mustGet(t, q, job.ID); got.Status != queue.RunCancelling {
+					t.Fatalf("row before reap = %q, want cancelling", got.Status)
+				}
+
+				n, err := q.ReapExpired(ctxT(t), future())
+				if err != nil || n != 1 {
+					t.Fatalf("reap after expiry = %d/%v, want 1/nil", n, err)
+				}
+				row := mustGet(t, q, job.ID)
+				if row.Status != queue.RunCancelled {
+					t.Fatalf("orphaned cancelling row = %q, want cancelled", row.Status)
+				}
+				if row.Attempts != 0 {
+					t.Fatalf("cancel reap must not charge the retry budget: attempts=%d", row.Attempts)
+				}
+				if !row.CancelRequested || row.ResultStatus != "" || row.ErrorMessage != "" {
+					t.Fatalf("cancelled row = %+v", row)
+				}
+				if row.CompletedAt.IsZero() || !row.LeaseUntil.IsZero() {
+					t.Fatalf("cancelled row must be terminal with the lease released: %+v", row)
+				}
+				// 保留上一次 owner 便于审计（§9.8 取舍 5，与 running 回收同口径）。
+				if row.WorkerID != "w1" {
+					t.Fatalf("reap must keep the last owner: %+v", row)
+				}
+				// 可重入：再扫没有行可迁。
+				if n, err := q.ReapExpired(ctxT(t), future()); err != nil || n != 0 {
+					t.Fatalf("second reap = %d/%v, want 0/nil", n, err)
+				}
+				// 终态之后不可再迁移。
+				if err := q.AckCancel(ctxT(t), job.ID, "w1"); !errors.Is(err, queue.ErrInvalidTransition) {
+					t.Fatalf("AckCancel after reap = %v, want ErrInvalidTransition", err)
 				}
 			},
 		},

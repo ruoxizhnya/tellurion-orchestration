@@ -108,9 +108,12 @@ type Registry struct {
 
 // 编译期断言：与 internal/queue/memory.go 里那两条对称——方法集是冻结面
 // （docs/ARCHITECTURE.md §9.6），少一个方法就是实现方全红。
+// KernelAwareJobQueue（§9.7 R9）也断在这里：两个实现都必须消费 Kernels，
+// 否则「按能力过滤」只剩文档里的一句话。
 var (
-	_ queue.JobQueue       = (*Queue)(nil)
-	_ queue.WorkerRegistry = (*Registry)(nil)
+	_ queue.JobQueue            = (*Queue)(nil)
+	_ queue.KernelAwareJobQueue = (*Queue)(nil)
+	_ queue.WorkerRegistry      = (*Registry)(nil)
 )
 
 // Queue 返回 JobQueue 的 PG 实现。
