@@ -74,6 +74,26 @@ func TestRegistryReRegisterKeepsDraining(t *testing.T) {
 	}
 }
 
+func TestRegistryReRegisterKeepsStartedAt(t *testing.T) {
+	c := newTestClock()
+	r := NewMemoryRegistry(RegistryOptions{Now: c.Now})
+
+	if err := r.Register(context.Background(), WorkerRecord{WorkerID: "w1", Kernels: []string{"go"}}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	started := c.Now()
+
+	c.Advance(time.Minute)
+	// 重注册是心跳式登记，不是新进程：started_at 不能被洗掉（否则查不出存活时长）。
+	if err := r.Register(context.Background(), WorkerRecord{WorkerID: "w1"}); err != nil {
+		t.Fatalf("Re-Register: %v", err)
+	}
+	list, _ := r.List(context.Background())
+	if !list[0].StartedAt.Equal(started) {
+		t.Fatalf("started_at = %v, want %v (re-register must not reset it)", list[0].StartedAt, started)
+	}
+}
+
 func TestRegistryDrain(t *testing.T) {
 	c := newTestClock()
 	r := NewMemoryRegistry(RegistryOptions{Now: c.Now})

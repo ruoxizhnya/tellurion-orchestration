@@ -268,6 +268,7 @@ type WorkerRegistry interface {
 | R6 | **batch / walkforward 的子 run 关系** | 每个 task / 窗口都是独立 run，但 `run` schema 只有 5 张表；直接在 `backtest_jobs` 加 `parent_id` 会跨表引用两种父（batch / wf） | 二选一：(a) `run.run_children(parent_kind, parent_id, child_run_id)` 第六张表（结构变更走 ADR）；(b) 子 run 的 `request_json` 带 `parent` 元数据、父表存 `child_run_ids TEXT[]`。**倾向 (a)**：可查询、可加唯一约束 |
 | R7 | **队列深度与 `queue_full` 阈值** | 今天无上限（每 job 一个 goroutine）；429 语义在新端点冻结，但阈值是部署配置 | 契约只冻结「达上限 → 429 + `queue_full`」；默认值由部署配置给出（建议 `max_pending = worker 数 × 4`，压测后定），不进契约 |
 | R8 | **`cancelling` 行的租约回收出口**（2026-10-23 施工 ① 新登记） | §9.5 的 `ReapExpired` 只定义了 `running` 的回收：`cancelling` 行的 owner 若崩溃，`AckCancel` 因租约过期拒绝、`ReapExpired` 又不处理它——该行会永久停在中间态 | 二选一：(a) `ReapExpired` 同批把「`cancelling` 且租约过期」落 `cancelled`（与两轴映射表的 `cancelling → cancelled` 一致，**倾向**）；(b) 新增运维端点强制终态。定之前内存实现**不擅自补语义**（见 §9.8 取舍 4） |
+| R9 | **按内核能力（`Kernels`）领取过滤**（2026-10-23 施工 ① 自审新登记） | §9.3 写 `Kernels` 用于"未知内核的 worker 不接该活"，但 §9.2 冻结的 `Claim(ctx, workerID, lease)` **没有内核参数**——过滤无法在领取点实现；`WorkerRecord.Kernels` 落了库但没有消费方 | 二选一：(a) `Claim` 加内核参数（**方法签名改 = MAJOR**，§9.6 版本策略）；(b) 内核过滤移到编排层（派活前查注册表，不进队列方法集）。倾向 (b)：`JobQueue` 只管队列，内核路由属编排职责。定之前 `Kernels` 只落库不消费（见 §9.8 取舍 6） |
 
 ### 9.8 实现现状（2026-10-23，施工 ①）
 
@@ -283,7 +284,7 @@ type WorkerRegistry interface {
 | `hash.go` | `Canonicalize`（键排序 + 去空白 + 保留数字原文）/ `RequestHash` = sha256 | §9.5 `request_hash` |
 | `memory.go` | `JobQueue` 内存实现（幂等 / 领取 / 租约 / 两轴终态 / 取消 / 回收） | X5a |
 | `worker.go` | `WorkerRegistry` 内存实现（注册 / 心跳 / drain） | X5c |
-| `ddl.go` | `run` schema 5 表 + 6 索引；`Migrations()` 返副本 | §9.5 D 组、`db-schema.md` §5 |
+| `ddl.go` | `run` schema 5 表 + 7 索引；`Migrations()` 返副本 | §9.5 D 组、`db-schema.md` §5 |
 
 **能跑 / 只是接口就位**
 
@@ -294,19 +295,21 @@ type WorkerRegistry interface {
 | 两轴终态（`completed+completed` / `completed+invalid` / `failed+failed` / `failed+NULL`） | ✅ 内存实现 + 单测 |
 | 取消（`pending`→`cancelled` 保留行；`running`→`cancelling`；owner `AckCancel`） | ✅ 内存实现 + 单测 |
 | 租约回收（`attempts+1` / `attempts_exhausted`） | ✅ 内存实现 + 单测 |
-| worker 注册 / 心跳 / drain（重复注册不洗回 `active`） | ✅ 内存实现 + 单测 |
+| worker 注册 / 心跳 / drain（重复注册不洗回 `active`，也不重置 `started_at`） | ✅ 内存实现 + 单测 |
+| 按内核能力（`Kernels`）过滤领取 | ⬜ **无法在 `Claim` 实现**——冻结的方法集没有内核参数（§9.7 R9）；`Kernels` 只落库不消费 |
 | `run` schema 建表 | ✅ DDL 落盘；**未接 PG**（本仓今天没有数据库装配） |
 | PG 版 `JobQueue`（`FOR UPDATE SKIP LOCKED`） | ⬜ 未实现——内存实现只保证语义，不保证多进程 |
 | 入队前「内核 / 市场可解析」校验（§9.4 fail-closed ①） | ⬜ 未实现（依赖 `EngineRegistry` / `MarketRouter`，本仓不引） |
 | `batch` / `walkforward` / `run_artifacts` / `/api/runs/*` HTTP 面 | ⬜ 未实现（X5b / X0 / C 组） |
 | worker 心跳超时 → `offline` | ⬜ 未实现（方法集冻结，无回收方法；补要新接口 = MAJOR，见 R8 同类问题） |
 
-**五条故意取舍**
+**六条故意取舍**
 
 1. **DDL 用 Go 数组、不用 `migrations/*.sql`**：取向 ①（与 core 一致，运维零新增）；`Migrations()` 只返副本，已落库语句只前滚。
 2. **`Enqueue` 现算 `request_hash`**：调用方自带 hash 与 `request_json` 不符时直接 `ErrInvalidInput`——幂等判据不允许有两个来源。
 3. **`Complete` 不接受 `cancelling` 行**：取消一经请求结果即作废，worker 只能 `AckCancel`（两轴映射表里 `cancelling` 的唯一出口是 `cancelled`）。
 4. **`ReapExpired` 只扫 `running`**：`cancelling` 行在 owner 消失后没有出口，属 §9.5 未定义口径——**不擅自补语义**，登记为 R8。
 5. **`worker_id` 在回收后保留**：`pending` 行没有 owner，但留上一次 owner 便于审计；Claim 时覆盖。
+6. **`Kernels` 只落库不消费**：冻结的 `Claim` 没有内核参数，按能力过滤放不进队列方法集（加参数 = MAJOR）——登记为 R9，倾向把过滤移到编排层。
 
 **自检结论**：单测层面成立；端到端不可用——没有 PG 装配、没有 HTTP 面、没有 worker 进程。判据是「X5a/X5c 语义已定形，落地未完成」。

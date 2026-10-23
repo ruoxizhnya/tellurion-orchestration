@@ -59,6 +59,11 @@ type Memory struct {
 	workers  WorkerRegistry
 }
 
+// 编译期断言：Memory 必须满足 JobQueue 的**全部**方法。
+// 方法集是冻结面（docs/ARCHITECTURE.md §9.6），少一个方法就是实现方全红——
+// 与其等到调用方编译失败，不如在这里钉住。
+var _ JobQueue = (*Memory)(nil)
+
 // NewMemory 构造内存队列。opts 最多取第一个非零项。
 func NewMemory(opts ...MemoryOptions) *Memory {
 	var o MemoryOptions
@@ -380,6 +385,10 @@ func (m *Memory) RequestCancel(ctx context.Context, runID string) error {
 
 // AckCancel 见 JobQueue 的契约注释：只允许当前 owner 在 running/cancelling 上
 // 确认；已终态 → ErrInvalidTransition。
+//
+// `pending` 行走下面的租约校验：它没有 owner、没有租约，因此报 ErrLeaseLost
+// （§9.2 冻结表只列了「非 owner → ErrLeaseLost」与「已终态 → ErrInvalidTransition」
+// 两种出口，这里不擅自加第三种）。
 func (m *Memory) AckCancel(ctx context.Context, runID, workerID string) error {
 	if err := ctx.Err(); err != nil {
 		return err

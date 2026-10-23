@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-10-22
-verified-by: M8 接口对表（QT-44 前置 ②）
+last-verified: 2026-10-23
+verified-by: X5a/X5c 落地 + 自审补登 R9（内核匹配缺口）
 ---
 
 # Dataflow — tellurion-orchestration
@@ -33,7 +33,8 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 **提交 / 执行**
 
 1. `POST /api/runs/jobs` → 校验 `idempotency_key` + RunSpec（market→kernel 在**入队前**解析）→ 算 `request_hash` → 写 `run.backtest_jobs(status=pending)` → 返回 `job_id`。同键同 hash = 原 job（200），同键不同 hash = 409。
-2. worker 领取：原子 `pending → running` + `worker_id` + `lease_until`（`SKIP LOCKED` 或等价）；只领 `kernels` 匹配的活。**worker 只执行行里的 `request_json`**，不从扁平列重建请求。
+2. worker 领取：原子 `pending → running` + `worker_id` + `lease_until`（`SKIP LOCKED` 或等价）；**worker 只执行行里的 `request_json`**，不从扁平列重建请求。
+   - ⚠️ **内核匹配未实现**：目标口径是"只领 `kernels` 匹配的活"，但冻结的 `Claim(ctx, workerID, lease)` 没有内核参数，过滤放不进队列方法集（加参数 = MAJOR）——见 `ARCHITECTURE.md` §9.7 **R9**，倾向把过滤移到编排层（派活前查注册表）。今天 `WorkerRecord.Kernels` 只落库不消费。
 3. 执行期心跳续租（`RenewLease`）；引擎在**日循环之前**写输入身份（interim：core `quant.run_provenance`；O1：`run.run_artifacts`，双写/对拍/切读/停写）。
 4. 终态写一次：`Complete(result_status, result_uri)` 或 `Fail(error, result_status)`。`result_status` 是 K9 三值，和队列 `status` 是**两轴**（`ARCHITECTURE.md` §9.1 F8）；终态的每一行必须符合 §9.5 的**两轴映射表**（`invalid` → `status=completed` + `result_status=invalid`，`error` 为空；failed 时按是否产出 ResultSpec 传 `failed` 或空串）。
 5. `GET /api/runs/jobs/{id}` 查生命周期 + 结果结论；`GET /api/runs/{id}/provenance` 是 `run_artifacts ⋈ backtest_jobs`，**不读** provenance 表里的 status（它没有 status）。

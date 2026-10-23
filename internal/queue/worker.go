@@ -24,6 +24,9 @@ type MemoryRegistry struct {
 	now     func() time.Time
 }
 
+// 编译期断言：MemoryRegistry 必须满足 WorkerRegistry 的全部方法（方法集冻结）。
+var _ WorkerRegistry = (*MemoryRegistry)(nil)
+
 // NewMemoryRegistry 构造内存注册表。
 func NewMemoryRegistry(opts ...RegistryOptions) *MemoryRegistry {
 	var o RegistryOptions
@@ -56,10 +59,18 @@ func (r *MemoryRegistry) Register(ctx context.Context, w WorkerRecord) error {
 	now := r.now().UTC()
 	next := w.Clone()
 	if existing, ok := r.workers[w.WorkerID]; ok {
+		// 重复注册 = 幂等覆盖（能力 / 心跳 / meta），**不动** status、
+		// drain_requested_at 与 started_at：
+		//   - status 保留 → 已 drain 的 worker 不能靠重注册洗回 active；
+		//   - started_at 保留 → 它记的是「这个 worker 进程起于何时」，
+		//     重注册只是又一次心跳式登记，不是新进程（洗掉就查不出存活时长）。
 		next.Status = existing.Status
 		next.DrainRequestedAt = existing.DrainRequestedAt
 		if next.LastHeartbeatAt.IsZero() {
 			next.LastHeartbeatAt = existing.LastHeartbeatAt
+		}
+		if next.StartedAt.IsZero() {
+			next.StartedAt = existing.StartedAt
 		}
 	} else {
 		next.Status = WorkerActive

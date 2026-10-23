@@ -459,6 +459,7 @@ func TestListFilteringAndClamp(t *testing.T) {
 	}
 
 	// limit 钳制：请求 1000 → 上限 100；0 → 默认 50。
+	// （真正的钳制断言在 TestListClampsLimit 里——这里只有 5 行，区分不出 100 与 50。）
 	limited, err := m.List(context.Background(), ListFilter{Limit: 1000})
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -493,6 +494,42 @@ func TestListFilteringAndClamp(t *testing.T) {
 	}
 	if empty == nil || len(empty) != 0 {
 		t.Fatalf("empty list must be [], got %#v", empty)
+	}
+}
+
+func TestListClampsLimit(t *testing.T) {
+	c := newTestClock()
+	m := newTestMemory(c)
+
+	// 150 行：够区分「上限 100」与「默认 50」两种钳制。
+	const total = 150
+	for i := 0; i < total; i++ {
+		mustEnqueue(t, m, fmt.Sprintf("k%d", i), 0)
+		c.Advance(time.Millisecond)
+	}
+
+	over, err := m.List(context.Background(), ListFilter{Limit: 1000})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(over) != MaxListLimit {
+		t.Fatalf("limit 1000 → %d rows, want %d (clamped)", len(over), MaxListLimit)
+	}
+
+	def, err := m.List(context.Background(), ListFilter{Limit: 0})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(def) != DefaultListLimit {
+		t.Fatalf("limit 0 → %d rows, want %d (default)", len(def), DefaultListLimit)
+	}
+
+	exact, err := m.List(context.Background(), ListFilter{Limit: 7})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(exact) != 7 {
+		t.Fatalf("limit 7 → %d rows, want 7", len(exact))
 	}
 }
 
