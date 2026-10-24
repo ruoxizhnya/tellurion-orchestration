@@ -24,4 +24,6 @@ var (
 	ErrWorkerDraining = errors.New("queue: worker draining")
 	// ErrWorkerNotFound 是未知 worker（心跳 / drain 不自动注册）。
 	ErrWorkerNotFound = errors.New("queue: worker not found")
+	// ErrParentNotFound 是未知 parent_job_id（batch / walkforward 共用一张父表）。
+	ErrParentNotFound = errors.New("queue: parent job not found")
 )

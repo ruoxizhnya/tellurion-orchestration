@@ -88,3 +88,20 @@ type WorkerRegistry interface {
 type WorkerReaper interface {
 	ReapOffline(ctx context.Context, now time.Time, timeout time.Duration) (int, error)
 }
+
+// ParentStore 是 `run.parent_jobs` 的读写门（裁-13，X5b）。
+//
+// 它与 JobQueue 分开：job 队列是冻结的 10 方法集，父记录是另一张表、另一套
+// 生命周期（提交一次、随子 run 结论汇总而变）。**不塞 `RunRecord`**——父表
+// 的身份是 `plan_canonical` / `plan_hash`，不是请求 JSON 的 JSONB 投影。
+type ParentStore interface {
+	// EnqueueParent 幂等写入一条父记录：同键同 plan_hash → 返回原行、created=false；
+	// 同键不同 hash → ErrIdempotencyConflict；键为空 / kind 未知 / hash 与 canonical
+	// 不符 → ErrInvalidInput。**不展开计划、不入队子 run**（那是 service 层的事）。
+	EnqueueParent(ctx context.Context, rec *ParentRecord) (parent *ParentRecord, created bool, err error)
+	// GetParent 未知 id → ErrParentNotFound。
+	GetParent(ctx context.Context, id string) (*ParentRecord, error)
+	// SaveParentSummary 写回三值计数 / 父状态 / 明细；未知 id → ErrParentNotFound。
+	// 计数自洽由 ParentSummary.Validate 判（settled ≤ total），越界 → ErrInvalidInput。
+	SaveParentSummary(ctx context.Context, id string, summary ParentSummary) (*ParentRecord, error)
+}

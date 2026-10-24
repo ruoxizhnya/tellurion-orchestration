@@ -23,6 +23,22 @@ const batchBase = `{
 	"strategy_params": {"lookback": 20, "threshold": 0.5, "smoothing": 5}
 }`
 
+// batchParent 是共享套件的父计划夹具：与 Plan 用的是同一次展开。
+func batchParent(t *testing.T) plan.ParentPlan {
+	t.Helper()
+	pp, err := plan.BuildBatchPlan(plan.BatchRequest{
+		BaseRunSpec: json.RawMessage(batchBase),
+		Grid: map[string][]json.RawMessage{
+			"lookback":  {json.RawMessage(`10`), json.RawMessage(`20`)},
+			"threshold": {json.RawMessage(`0.1`), json.RawMessage(`0.2`)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildBatchPlan: %v", err)
+	}
+	return pp
+}
+
 func batchSubject() plansuite.Subject {
 	return plansuite.Subject{
 		Name:     "Batch",
@@ -31,17 +47,11 @@ func batchSubject() plansuite.Subject {
 		UnitSize: 1,
 		Plan: func(t *testing.T) []plan.Child {
 			t.Helper()
-			children, err := plan.ExpandBatch(plan.BatchRequest{
-				BaseRunSpec: json.RawMessage(batchBase),
-				Grid: map[string][]json.RawMessage{
-					"lookback":  {json.RawMessage(`10`), json.RawMessage(`20`)},
-					"threshold": {json.RawMessage(`0.1`), json.RawMessage(`0.2`)},
-				},
-			})
-			if err != nil {
-				t.Fatalf("ExpandBatch: %v", err)
-			}
-			return children
+			return batchParent(t).Children
+		},
+		Parent: func(t *testing.T) plan.ParentPlan {
+			t.Helper()
+			return batchParent(t)
 		},
 		Summarize: func(t *testing.T, outcomes []plansuite.Outcome) (plan.Counts, plan.ParentStatus) {
 			t.Helper()

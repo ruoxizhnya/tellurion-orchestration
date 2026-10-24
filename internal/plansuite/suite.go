@@ -48,6 +48,10 @@ type Subject struct {
 	UnitSize int
 	// Summarize 把按 Child.Index 顺序给出的子结论汇总成父报告。
 	Summarize func(t *testing.T, outcomes []Outcome) (plan.Counts, plan.ParentStatus)
+	// Parent 产出可提交的父计划（plan_canonical / plan_hash 的载体）。
+	// 它与 Plan 必须是同一个展开结果——两种父都经这一条腿证明「提交身份」
+	// 不是另写一套。
+	Parent func(t *testing.T) plan.ParentPlan
 }
 
 // Run 把共享用例跑在给定 Subject 上。
@@ -68,6 +72,7 @@ func Run(t *testing.T, s Subject) {
 		{"AnyFailureFailsTheParent", anyFailureFailsTheParent},
 		{"AllFailuresAreNotAnEmptySuccess", allFailuresAreNotAnEmptySuccess},
 		{"PendingKeepsTheParentRunning", pendingKeepsTheParentRunning},
+		{"ParentPlanIdentityIsDeterministic", parentPlanIdentityIsDeterministic},
 	}
 	for _, c := range cases {
 		t.Run(s.Name+"/"+c.Name, func(t *testing.T) {
@@ -195,6 +200,59 @@ func pendingKeepsTheParentRunning(t *testing.T, s Subject) {
 	assertCounts(t, counts, plan.Counts{Total: 3, Completed: 2, Pending: 1})
 	if status != plan.ParentRunning {
 		t.Fatalf("status = %q, want running（未回报不能提前宣布完成）", status)
+	}
+}
+
+// parentPlanIdentityIsDeterministic 钉住提交身份（裁-13）：同一份父请求两次
+// 展开出的 plan_canonical 必须逐字节一致、plan_hash 必须一致；子 run 计划
+// 必须与 Plan 的展开结果同一份；Units 与子 run 数的关系按 UnitSize 成立。
+func parentPlanIdentityIsDeterministic(t *testing.T, s Subject) {
+	t.Helper()
+	if s.Parent == nil {
+		t.Fatalf("plansuite: %s.Parent is required（父计划身份必须被两种父共同证明）", s.Name)
+	}
+
+	first := s.Parent(t)
+	second := s.Parent(t)
+
+	firstCanonical, err := first.Canonical()
+	if err != nil {
+		t.Fatalf("Canonical: %v", err)
+	}
+	secondCanonical, err := second.Canonical()
+	if err != nil {
+		t.Fatalf("Canonical: %v", err)
+	}
+	if !bytes.Equal(firstCanonical, secondCanonical) {
+		t.Fatalf("parent plan canonical is not byte-stable:\n%s\n%s", firstCanonical, secondCanonical)
+	}
+
+	firstHash, err := first.Hash()
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
+	secondHash, err := second.Hash()
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
+	if firstHash != secondHash || len(firstHash) != 64 {
+		t.Fatalf("plan_hash = %q / %q, want the same 64-hex value", firstHash, secondHash)
+	}
+
+	if first.Units <= 0 || first.Units*s.UnitSize != len(first.Children) {
+		t.Fatalf("units = %d, children = %d, unit size = %d（父计划的汇总单元数与子 run 数必须自洽）",
+			first.Units, len(first.Children), s.UnitSize)
+	}
+
+	planned := s.Plan(t)
+	if len(planned) != len(first.Children) {
+		t.Fatalf("Parent children = %d, Plan children = %d", len(first.Children), len(planned))
+	}
+	for i := range planned {
+		if !bytes.Equal(planned[i].Request, first.Children[i].Request) {
+			t.Fatalf("child %d differs between Plan and Parent:\n%s\n%s",
+				i+1, planned[i].Request, first.Children[i].Request)
+		}
 	}
 }
 

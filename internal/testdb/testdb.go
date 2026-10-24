@@ -65,14 +65,15 @@ func Setup(ctx context.Context, dsn string, wait time.Duration) (*Harness, error
 // Store 返回已建好表的 Store。
 func (h *Harness) Store() *pgstore.Store { return h.store }
 
-// Reset 清空 run schema 的全部五张表。
+// Reset 清空 run schema 的全部六张表。
 //
-// 一次列全五张表：run_artifacts 对 backtest_jobs 有 FK，只清父表会被约束挡住。
+// 一次列全六张表：run_artifacts 对 backtest_jobs 有 FK、backtest_jobs.parent_job_id
+// 对 parent_jobs 有 FK，只清父表会被约束挡住。
 // 只能在持锁期间调用——否则会把别的测试进程的行一起清掉（本包存在的理由）。
 func (h *Harness) Reset(ctx context.Context) error {
 	_, err := h.store.Pool().Exec(ctx, `TRUNCATE
 		run.backtest_jobs, run.run_artifacts, run.batch_runs,
-		run.walk_forward_reports, run.worker_registry`)
+		run.walk_forward_reports, run.worker_registry, run.parent_jobs`)
 	if err != nil {
 		return fmt.Errorf("testdb: truncate run schema: %w", err)
 	}

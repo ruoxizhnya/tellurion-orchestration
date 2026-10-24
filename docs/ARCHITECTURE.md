@@ -18,7 +18,7 @@ verified-by: 施工 ⑤（R10 心跳超时 → offline 已落两个实现；§8/
 提交面（HTTP，异步）
   POST jobs / batch / walkforward  ── 幂等键 → job_id
         ↓
-   run.backtest_jobs / batch_runs / walk_forward_reports / run_artifacts / worker_registry
+   run.backtest_jobs / parent_jobs / run_artifacts / worker_registry（batch_runs / walk_forward_reports 为迁移期旧表）
         ↓
    worker 池（领取 / 心跳 / drain）
         ↓
@@ -70,7 +70,7 @@ tellurion-orchestration ──► core 引擎（派活）
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | X5a | job 队列 + 状态机 + 幂等 | ✅ 内存 + PG 两个实现 + jobs 4 端点（施工 ②③④）；R8/R9 已落，见 §9.8 |
-| X5b | batch + walkforward | 🔶 规划与汇总纯函数已落（施工 ⑥：网格展开 / 窗口切分 / 三值汇总 + 共享套件）；HTTP 端点与 `batch_runs` / `walk_forward_reports` 写入未落 |
+| X5b | batch + walkforward | 🔶 规划与汇总纯函数已落（施工 ⑥）；**父表 `parent_jobs` + `backtest_jobs.parent_job_id` 已落（施工 ⑦，裁-13）**，提交写父表 + 汇总写回已接 `internal/parents`；HTTP 4 端点、子 run 入队、worker 执行未落 |
 | X5c | worker 注册 / 心跳 / drain / 心跳超时 | 🔶 注册 / 心跳 / drain / 心跳超时 → `offline` 已落（内存 + PG，施工 ⑤）；worker 进程本身未做（派活契约未定），见 §9.8 |
 | X0 | 三 hash 留痕（`run_artifacts`） | ⬜ |
 
@@ -227,6 +227,7 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | `cancel_requested` | `BOOLEAN NOT NULL DEFAULT FALSE` | 跨进程取消信号 |
 | `error_message` | `TEXT` | `failed` 必填（与 K9 的 `error` 同义） |
 | `result_uri` | `TEXT` | **结果本体指针**；`run` 不存结果内容（AGENTS 边界） |
+| `parent_job_id` | `TEXT`，可空，FK → `run.parent_jobs.parent_job_id`（`ON DELETE SET NULL`）；部分索引 `WHERE parent_job_id IS NOT NULL` | 子 run 关系（裁-13）：批量网格点 / 前向验证的 train·test 都是独立 run，靠这一列归属父计划。**不**在 `request_json` 里塞父元数据（那会改 `request_hash`） |
 | `created_at` / `started_at` / `completed_at` | `TIMESTAMPTZ` | 时间线 |
 
 索引：`(priority DESC, created_at ASC, id ASC) WHERE status='pending'`（领取；`status` 不作键列——partial 谓词已限定，第三键 `id` 与内存实现的 tie-break 同形；谓词里**不放** `lease_until`，因为冻结判据是「已释放**或**已过期」，见 §9.2）、`(worker_id, status)`（drain 收尾）、`(created_at DESC)`（列表）、`(idempotency_key)` 唯一（幂等）、`(result_status)`（按结论筛选）。**迁移期**保留旧 `result JSONB` 只读（O1 切读后删除），不在新代码里读写它。
@@ -258,9 +259,9 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 
 **不存 `status`**（QT-63 ④ / H5 的单一同源）；`/provenance` 由本表 ⋈ `backtest_jobs` 取 `result_status`。三 hash + `artifact_uri` 是**冻结面**：增列 / 改口径 / 改 hash 算法都走评审（`db-schema.md` §1 的冻结标注）。同一 `run_id` 重复写入：同身份幂等；**不同 hash → fail-loud**（`ErrRunProvenanceConflict`，QT-63 ⑦；禁止 `ON CONFLICT DO NOTHING` 静默吞身份漂移）。`invalid_reasons` **不进 `run`**——它在结果 artifact 里，本表只记结论 `result_status`。
 
-**`run.batch_runs`**：`batch_id TEXT PK`、`idempotency_key`（唯一）、`request_json JSONB`（网格 + base RunSpec）、`status`（生命周期）、`total/completed/invalid/failed`、`summary_json JSONB`（只放排序与计数，不复制每个结果）、`created_at/completed_at`。
+**`run.parent_jobs`（裁-13：一张表承载两种父）**：`parent_job_id TEXT PK`、`idempotency_key`（唯一）、`kind TEXT CHECK (batch|walkforward)`、`plan_canonical TEXT`（**字节锚点**）、`plan_hash CHAR(64)`（= `sha256(plan_canonical)`）、`status`（与 job 同六态词表）、`total/completed/invalid/failed`、`summary_json JSONB`（排序 / 逐窗结论，不复制子结果）、`created_at/completed_at`。提交由 `internal/parents.SubmitBatch` / `SubmitWalkForward` 写一行（`internal/plan` 展开 → canonical/hash → `EnqueueParent`）；汇总由 `ApplyBatchSummary` / `ApplyWalkForwardSummary` 复用 `plan.Aggregate*` 后写回三值计数与父状态。
 
-**`run.walk_forward_reports`**：`wf_id TEXT PK`、`idempotency_key`（唯一）、`request_json JSONB`、`window_config JSONB`、`status`、`total/completed/invalid/failed_windows`、`report_uri TEXT`（明细指针）、`summary_json JSONB`、`created_at/completed_at`。每个窗口的 train/test 是 `backtest_jobs` 的独立行（各自 `run_artifacts`）；窗口→run 的关系见 §9.7 R6。
+**`run.batch_runs` / `run.walk_forward_reports`（迁移期旧表）**：DDL 保留只前滚，**停写**；父记录统一落 `parent_jobs`，O1 对拍后删除。
 
 **`run.worker_registry`**：`worker_id TEXT PK`、`kernels TEXT[]`、`status TEXT CHECK (active|draining|offline)`、`last_heartbeat_at TIMESTAMPTZ`、`drain_requested_at TIMESTAMPTZ`、`started_at TIMESTAMPTZ`、`meta JSONB`；心跳超时 → `offline`（由 `WorkerReaper.ReapOffline` 写入，`cmd` 与 `ReapExpired` 同一轮周期任务调用；R10），不是删行。
 
@@ -289,7 +290,7 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | R3 | **per-run seed / 策略参数** | `BacktestRequest` 没有 `Seed` 与 `StrategyParams`；seed 是进程级 `Config.Seed`（`pkg/backtest/engine.go:35`），params 只有默认值（`pkg/backtest/provenance.go:226`） | interim：编排配置固定 worker seed、同部署同值，`run_spec_hash` 记生效 seed；per-run 覆写要改冻结的 RunSpec（QT-21 / SPEC 评审），不在 QT-44 擅改 |
 | R4 | **`JobQueue` port 的归属与版本** | contracts 今天 `JobQueue` 零命中；本仓是 S0 占位；core 需要 adapter | S1 迁 contracts（core adapter + 本仓实现 = 两个使用方，满足 ADR-0001 ①）；先在本仓落同名接口，contracts 发布后切 import。`RunStateStore` **不新增**（H5 作废） |
 | R5 | **鉴权与 worker 身份** | C 组全部端点未实现；worker_id 可伪造；`/api/runs/*` 与 QT-50 ④ 的鉴权矩阵未合流 | 与 QT-50 ④ 同一套 `unauthenticated` / `forbidden`；worker 注册必须带凭证（不能只报一个 id）；`drain` 只能由运维角色调用 |
-| R6 | **batch / walkforward 的子 run 关系** | 每个 task / 窗口都是独立 run，但 `run` schema 只有 5 张表；直接在 `backtest_jobs` 加 `parent_id` 会跨表引用两种父（batch / wf）。**2026-10-24 施工 ⑥ 实测口径**：X5b 的规划/汇总层不依赖该裁决，故**未裁也未绕过**——不建第六张表、不塞 `request_json` 父元数据、不写父表 | 二选一：(a) `run.run_children(parent_kind, parent_id, child_run_id)` 第六张表（结构变更走 ADR）；(b) 子 run 的 `request_json` 带 `parent` 元数据、父表存 `child_run_ids TEXT[]`。**倾向 (a)**：可查询、可加唯一约束。**裁决前置**：父记录持久化前必须先定，否则子 run 与父记录无法建立可查询的关系 |
+| R6 | **batch / walkforward 的子 run 关系** | ✅ **已裁 2026-10-25（裁-13）**：建**一张** `run.parent_jobs`（`kind` + `plan_canonical`/`plan_hash` + 三值汇总），子 run 用 `run.backtest_jobs.parent_job_id` 列 + 索引表达；**不**塞 `request_json`（`request_canonical` 锚点已证明 JSONB 不能当身份），**不**建两张实体表（两种父共用一套生命周期，`internal/plansuite` 已钉「不各写一套」）。`batch_runs` / `walk_forward_reports` 降为迁移期旧表、停写。落地见 §9.8 施工 ⑦ |
 | R7 | **队列深度与 `queue_full` 阈值** | 今天无上限（每 job 一个 goroutine）；429 语义在新端点冻结，但阈值是部署配置 | 契约只冻结「达上限 → 429 + `queue_full`」；默认值由部署配置给出（建议 `max_pending = worker 数 × 4`，压测后定），不进契约 |
 | R8 | **`cancelling` 行的租约回收出口**（2026-10-23 施工 ① 新登记；**已裁 2026-10-23 = 选 (a)**；**已落 施工 ④，两个实现同批**） | §9.5 的 `ReapExpired` 只定义了 `running` 的回收：`cancelling` 行的 owner 若崩溃，`AckCancel` 因租约过期拒绝、`ReapExpired` 又不处理它——该行会永久停在中间态 | ✅ 落地形状：`ReapExpired` 的第二类迁移「`cancelling` 且租约过期 → `cancelled`」，**不**计 attempts（它不是重试，是给已作废的结果收尾）。内存侧在 `Memory.ReapExpired` 的分支里；PG 侧是 `reapCancellingSQL` 这条**独立语句**（`reapSQL` 保持原样：两条判据不同形就不合并成一条带 CASE 的 UPDATE）。钉子：`qtest.ReapLandsOrphanedCancellingRow`（两侧同跑），破坏腿见 `docs/TASKS.md` 施工 ④ |
 | R9 | **按内核能力（`Kernels`）领取过滤**（2026-10-23 施工 ① 自审新登记；**已裁 2026-10-23 = 加可选新接口（MINOR）——既不是 (a)，也不是当初倾向的 (b)**；**已落 施工 ④**） | §9.3 写 `Kernels` 用于"未知内核的 worker 不接该活"，但 §9.2 冻结的 `Claim(ctx, workerID, lease)` **没有内核参数**——过滤无法在领取点实现；`WorkerRecord.Kernels` 落了库但没有消费方 | ✅ 落地形状：新接口 `KernelAwareJobQueue.ClaimByKernel`——§9.6「加可选能力走新接口 = MINOR」那条的第一次实际使用，冻结的 10 方法集一字未动（(a) 会破 §9.6，(b) 会让能力声明继续只落库）。能力取 worker **在注册表里声明的** `Kernels`，不是调用方现传；未注册 / 无声明 / 注册表未装配 ⇒ 不过滤。行的生效内核抽取规则见 §9.2 那条口径（只有 JSON 字符串算内核）。钉子：`ClaimByKernelReadsOnlyStringKernels`（两侧同口径）+ `ClaimWithoutKernelFilterStaysUnfiltered`（证明冻结面没被顺手加上过滤）。**仍未落**：worker 进程本身（本仓没有引擎），消费方目前只有套件与两个编译期断言 |
@@ -309,7 +310,16 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | `hash.go` | `Canonicalize`（键排序 + 去空白 + 保留数字原文）/ `RequestHash` = sha256 | §9.5 `request_hash` |
 | `memory.go` | `JobQueue` 内存实现（幂等 / 领取 / 租约 / 两轴终态 / 取消 / 回收）+ `ClaimByKernel`（与 `Claim` 共用一个 `claim` 体，只差一条过滤）；`ReapExpired` 两类迁移（running / orphaned cancelling） | X5a |
 | `worker.go` | `WorkerRegistry` 内存实现（注册 / 心跳 / drain）+ `WorkerReaper.ReapOffline`（心跳超时 → offline；offline 的存活证明可复活，drain 意图不可） | X5c |
-| `ddl.go` | `run` schema 5 表 + 7 索引；`Migrations()` 返副本 | §9.5 D 组、`db-schema.md` §5 |
+| `ddl.go` | `run` schema 6 表 + 10 索引（含裁-13 的 `parent_jobs`、`backtest_jobs.parent_job_id` 列 / 索引）；`Migrations()` 返副本 | §9.5 D 组、`db-schema.md` §5 |
+| `parent_memory.go` | `ParentStore` 内存实现（幂等 / plan_hash 冲突 / 汇总写回）+ `PrepareParent`（**两个实现共用**的 canonical / hash / 计数校验） | 裁-13、X5b 施工 ⑦ |
+
+**落地包（`internal/plan` 的父计划身份，施工 ⑦）**
+
+| 文件 | 内容 | 对应 |
+|---|---|---|
+| `internal/plan/parent.go` | `BuildBatchPlan` / `BuildWalkForwardPlan`（复用 `Expand*`）+ `ParentPlan.Canonical/Hash`（`plan_canonical` 的稳定字节与 sha256）+ `PendingCounts` | §9.5 `parent_jobs` |
+| `internal/parents/service.go` | `SubmitBatch` / `SubmitWalkForward`（提交即写父表）+ `ApplyBatchSummary` / `ApplyWalkForwardSummary`（复用 `Aggregate*` 写回三值计数与父状态） | 裁-13 |
+| `internal/plansuite/suite.go` | 共享套件新增 `ParentPlanIdentityIsDeterministic`：两种父同跑——canonical 逐字节稳定、hash 一致、Units×UnitSize=子 run 数、子计划与 `Plan` 同源 | X5b 验收 |
 
 **落地包（`internal/httpapi`，施工 ②）**
 
@@ -327,9 +337,10 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | `internal/pgstore/store.go` | `Open`（DSN 空 fail-closed，不退回内存）/ `Migrate`（按序幂等执行 `queue.Migrations()`）/ `Options` / `jobCols` 派生两条列清单 / `rowToJob`（NULL↔零值、UTC、CHAR 补齐裁剪）/ `lockJob`（`FOR UPDATE`）/ `checkLease` | §9.2 A-1、§9.5 |
 | `internal/pgstore/queue.go` | `JobQueue` 的 PG 实现 10 方法 + 可选的 `ClaimByKernel`：`Claim`/`ClaimByKernel` 共用**一条** `claimSQL`（`$4::text[]` 传 NULL 即不过滤，两个入口不会各写一份 SQL 而漂掉），`FOR UPDATE SKIP LOCKED` + `priority DESC → created_at → id`；`Enqueue` 在 `pg_advisory_xact_lock` 里做「查键 → 数深度 → 插行」；终态方法先锁行再按 §9.5 两轴映射表判定；回收是 `reapSQL`（running）+ `reapCancellingSQL`（R8）两条语句、**同一个事务**（否则半迁移态配一个 count 返回值是错的） | X5a 的 durable 侧 |
 | `internal/pgstore/registry.go` | `WorkerRegistry` 的 PG 实现（UPSERT 保 status/started_at/drain 时刻；offline 的复活与心跳刷新是同一条 UPDATE 的 CASE）+ `reapOfflineSQL`（R10） | X5c 的 durable 侧 |
+| `internal/pgstore/parents.go` | `ParentStore` 的 PG 实现（`EnqueueParent` 在 `pg_advisory_xact_lock` 里查键 / 插行；`SaveParentSummary` 单条 UPDATE；`plan_canonical` 只存 TEXT、不复算 JSONB） | 裁-13、X5b 施工 ⑦ |
 | `internal/qtest/suite.go` | **语义套件**：30 条队列用例 + 9 条注册表用例 + 6 条跨 port 用例 = 每个实现 45 条（施工 ⑤ 新增 3 条注册表 + 1 条跨 port），内存与 PG 各跑一遍 | §9.8「换 PG 实现时行为不变」的可执行判据 |
 | `internal/plan/` | **batch / walkforward 规划与汇总**（施工 ⑥，X5b）：`ExpandBatch`（网格笛卡尔积 + `strategy_params` 浅合并）、`SplitWindows` / `ExpandWalkForward`（交易日切窗 + 只改日期派生 train/test）、`AggregateBatch` / `AggregateWalkForward`（三值计数、只对 completed 且给分者排名、父状态判定） | §9.8 施工 ⑥、`dataflow.md` §2 第 9/10 步 |
-| `internal/plansuite/suite.go` | **规划 / 汇总共享套件**（施工 ⑥）：7 条共享用例同时跑在 batch 与 walkforward 两个 Subject 上（确定性、完整 RunSpec 保留、三值计数、invalid≠failed、部分失败、全失败、pending）；不依赖任何存储实现 | §9.8「两种父记录不各写一套汇总口径」的可执行判据 |
+| `internal/plansuite/suite.go` | **规划 / 汇总共享套件**（施工 ⑥⑦）：8 条共享用例同时跑在 batch 与 walkforward 两个 Subject 上（确定性、完整 RunSpec 保留、三值计数、invalid≠failed、部分失败、全失败、pending、父计划身份）；不依赖任何存储实现 | §9.8「两种父记录不各写一套汇总口径」的可执行判据 |
 | `internal/testdb/testdb.go` | PG 腿 harness：跨测试**进程**的会话级 advisory lock + 每用例前清库 | 见下方「施工 ③ 的三条实测」第 3 条 |
 | `cmd/orchestrationservice/main.go` | 进程装配：`-dsn`/`ORCHESTRATION_DSN`（两者都空即拒绝启动）→ `Migrate` → 监听（`127.0.0.1:8088`，jobs 4 端点 + `/healthz`）+ 周期回收（`-reap-interval` 默认 30s：租约 `ReapExpired` + 心跳 `ReapOffline`，后者由 `-heartbeat-timeout` 默认 90s 控制，0 = 关闭；开启时装配期 fail-closed 检查注册表确实实现了 `WorkerReaper`） | §9.5 建表入口、`dataflow.md` §2 第 7/8 步 |
 | `internal/pgstore/*_test.go` | PG 专属腿：迁移幂等 + 表/索引形状、列清单双向核对、`CHAR(64)` 补齐、三条库约束（唯一索引 / 两个 CHECK / FK）、租约谓词、`request_canonical` 锚点、并发领取不重发 | 破坏验证的落点 |
@@ -383,11 +394,11 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 
 | 面 | 已落口径 | 未落 |
 |---|---|---|
-| batch 网格 | 参数名按字典序、最后一个参数变化最快；展开是**笛卡尔积**，每个点生成完整 RunSpec（`strategy_params` 浅合并，网格值覆盖同名 base 值，其余字段一字不改）；空网格 / 空取值 / 非标量 / 尾随内容 / 超过 100 个任务 → `invalid_params` | 父记录 `batch_runs` 写入、`/api/runs/batch` 端点 |
-| walkforward 窗口 | 交易日必须严格递增；只生成**完整**窗口（train/test 各按交易日数），`step_days` 必须为正；train/test 首尾相接不重叠；`min_train_days` 空 = `train_days/2`（固定窗口下恒成立）；不足一个完整窗口 / 日历违约 → `invalid_params` | 直连 data 服务的 `TradingCalendar` 只读 port（本层只收日历切片）、父记录 `walk_forward_reports` 写入、`/api/runs/walkforward` 端点 |
-| 子 run 派生 | walkforward 每窗两条（train / test），只替换 `start_date` / `end_date`；kernel / fill_timing / seed / strategy_params / strategy_ref 原样保留（共享套件逐字段断言） | 子 run 入队与幂等键生成、R6 的子 run 关系 |
+| batch 网格 | 参数名按字典序、最后一个参数变化最快；展开是**笛卡尔积**，每个点生成完整 RunSpec（`strategy_params` 浅合并，网格值覆盖同名 base 值，其余字段一字不改）；空网格 / 空取值 / 非标量 / 尾随内容 / 超过 100 个任务 → `invalid_params` | `/api/runs/batch` 端点、子 run 入队 |
+| walkforward 窗口 | 交易日必须严格递增；只生成**完整**窗口（train/test 各按交易日数），`step_days` 必须为正；train/test 首尾相接不重叠；`min_train_days` 空 = `train_days/2`（固定窗口下恒成立）；不足一个完整窗口 / 日历违约 → `invalid_params` | 直连 data 服务的 `TradingCalendar` 只读 port（本层只收日历切片）、`/api/runs/walkforward` 端点 |
+| 子 run 派生 | walkforward 每窗两条（train / test），只替换 `start_date` / `end_date`；kernel / fill_timing / seed / strategy_params / strategy_ref 原样保留（共享套件逐字段断言） | 子 run 入队与幂等键生成（关系列已落：`backtest_jobs.parent_job_id`） |
 | 汇总 | 三值分开计数（`completed` / `invalid` / `failed`）+ `pending`；batch 必须传计划总数且与逐条回报数一致（漏报即拒），walkforward 缺段 / 缺窗算 pending；只对 `completed` 且给出有限 score 的子 run 排名（同分按 `run_id` 升序），`invalid` / `failed` 保留但 `rank=0`；walkforward 单段失败 = 整窗失败；父状态：还有未回报 → `running`，任一 failed → `failed`（**不吞**子失败），否则 `completed` | 结果内容解析 / 指标均值（本仓不碰结果内容；score 由执行侧给） |
 
-**R6 仍未裁**：施工 ⑥ **没有**建第六张表、没有给子 run 的 `request_json` 塞父元数据，也没有写 `batch_runs` / `walk_forward_reports` 行——父记录持久化必须等 R6 定下「子 run 关系怎么存」（(a) 第六张表 / (b) 父表存 `child_run_ids`）。因此本轮的产出是**可复用的规划与汇总层**，不是可运行的 batch/wf 端点；`run` schema 五张表的语义一字未改。
+**裁-13 落地（施工 ⑦）**：父记录不再等 R6——建 **一张** `run.parent_jobs`，子 run 用 `backtest_jobs.parent_job_id`（列 + 索引）归属父计划；`internal/parents` 的 `SubmitBatch` / `SubmitWalkForward` 提交即写父表，`ApplyBatchSummary` / `ApplyWalkForwardSummary` 复用 `internal/plan` 的汇总写回三值计数。`batch_runs` / `walk_forward_reports` 停写、保留为迁移期旧表。**仍未落**：batch / walkforward 的 4 个 HTTP 端点、子 run 入队、worker 执行。
 
-**自检结论**（施工 ⑥ 后）：队列的语义面与 durable 面已落地（内存 + PG 同一套 qtest，45 条/实现；R10 的 PG 腿本机无库未跑，如实登记）；`internal/plan` 把 X5b 的**规划与汇总**做成了纯函数，并由 `internal/plansuite` 的 7 条共享用例同时跑在 batch / walkforward 上；`cmd/orchestrationservice` 仍只提供 jobs 4 端点。**仍未完成**：batch/walkforward 的父记录持久化与 4 端点、X0（`run_artifacts` 写入 + `/provenance`）、worker 领取执行的装配（本仓没有引擎，故 `ClaimByKernel` 目前没有生产消费方）、鉴权（R5）、R6 的子 run 关系、以及 `pkg/backtest` 侧的迁移（属 core，见 `docs/TASKS.md` 验收对照）。判据是「队列可运行、批量/前向的算账逻辑可单测，但还不能落库、不能对外提交」。
+**自检结论**（施工 ⑦ 后）：队列的语义面与 durable 面已落地（内存 + PG 同一套 qtest，45 条/实现；R10 的 PG 腿本机无库未跑，如实登记）；`internal/plan` 把 X5b 的**规划与汇总**做成了纯函数，`internal/plansuite` 的 8 条共享用例同跑两种父；父记录的身份 / 提交 / 汇总已落 `internal/parents` + 两个 `ParentStore` 实现。**仍未完成**：batch/walkforward 的 4 端点、子 run 入队、X0（`run_artifacts` 写入 + `/provenance`）、worker 领取执行的装配（本仓没有引擎，故 `ClaimByKernel` 目前没有生产消费方）、鉴权（R5）、以及 `pkg/backtest` 侧的迁移（属 core，见 `docs/TASKS.md` 验收对照）。判据是「队列可运行、父计划可提交 / 可汇总落库，但还不能从 HTTP 提交、也不能自己跑子 run」。

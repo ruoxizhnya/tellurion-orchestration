@@ -8,6 +8,7 @@ package queue
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -104,6 +105,7 @@ func ValidResultStatus(s ResultStatus) bool {
 type RunRecord struct {
 	ID              string          `json:"id"`
 	IdempotencyKey  string          `json:"idempotency_key,omitempty"`
+	ParentJobID     string          `json:"parent_job_id,omitempty"`
 	RequestHash     string          `json:"request_hash"`
 	RequestJSON     json.RawMessage `json:"request_json"`
 	Status          RunStatus       `json:"status"`
@@ -171,4 +173,80 @@ func (w WorkerRecord) Clone() WorkerRecord {
 		out.Meta = append(json.RawMessage(nil), w.Meta...)
 	}
 	return out
+}
+
+// ParentKind 是父计划的两种形态（裁-13：一张 parent_jobs 表，不建两张实体表）。
+type ParentKind string
+
+const (
+	ParentBatch       ParentKind = "batch"
+	ParentWalkForward ParentKind = "walkforward"
+)
+
+// ValidParentKind 报告 k 是否是已知父种类。
+func ValidParentKind(k ParentKind) bool {
+	return k == ParentBatch || k == ParentWalkForward
+}
+
+// ParentRecord 是 `run.parent_jobs` 的一行。
+//
+// 身份是 plan_canonical（TEXT 字节锚点）+ plan_hash，不是 JSONB：与
+// `backtest_jobs.request_canonical` 同一条实测教训（JSONB 会规范化数字文本，
+// 拿它复算 hash 会把同一次提交判成两次）。三值计数只放汇总，不放子结果内容。
+type ParentRecord struct {
+	ID             string          `json:"parent_job_id"`
+	IdempotencyKey string          `json:"idempotency_key,omitempty"`
+	Kind           ParentKind      `json:"kind"`
+	PlanCanonical  string          `json:"plan_canonical"`
+	PlanHash       string          `json:"plan_hash"`
+	Status         RunStatus       `json:"status"`
+	Total          int             `json:"total"`
+	Completed      int             `json:"completed"`
+	Invalid        int             `json:"invalid"`
+	Failed         int             `json:"failed"`
+	SummaryJSON    json.RawMessage `json:"summary_json,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	CompletedAt    time.Time       `json:"completed_at,omitempty"`
+}
+
+// Terminal 报告父记录是否已到终态。
+func (p ParentRecord) Terminal() bool {
+	return p.Status == RunCompleted || p.Status == RunFailed || p.Status == RunCancelled
+}
+
+// Clone 深拷贝（PlanCanonical 是字符串不可变，SummaryJSON 是切片）。
+func (p ParentRecord) Clone() ParentRecord {
+	out := p
+	if p.SummaryJSON != nil {
+		out.SummaryJSON = append(json.RawMessage(nil), p.SummaryJSON...)
+	}
+	return out
+}
+
+// ParentSummary 是汇总写回的载荷（三值计数 + 父状态 + 可选明细）。
+//
+// 它是 plan.Counts 的**落库形**：plan 包 import queue，反向不成立，所以这里
+// 用基本类型承载，映射只发生在 service 层一处。
+type ParentSummary struct {
+	Status      RunStatus
+	Total       int
+	Completed   int
+	Invalid     int
+	Failed      int
+	SummaryJSON json.RawMessage
+	CompletedAt time.Time
+}
+
+// Validate 检查计数自洽（与 plan.Counts.Validate 同口径：非负且已落定 + 未回报 = Total）。
+func (s ParentSummary) Validate() error {
+	if s.Total < 0 || s.Completed < 0 || s.Invalid < 0 || s.Failed < 0 {
+		return fmt.Errorf("%w: parent counts must be non-negative", ErrInvalidInput)
+	}
+	if !ValidRunStatus(s.Status) {
+		return fmt.Errorf("%w: unknown parent status %q", ErrInvalidInput, s.Status)
+	}
+	if settled := s.Completed + s.Invalid + s.Failed; settled > s.Total {
+		return fmt.Errorf("%w: settled counts (%d) exceed total (%d)", ErrInvalidInput, settled, s.Total)
+	}
+	return nil
 }

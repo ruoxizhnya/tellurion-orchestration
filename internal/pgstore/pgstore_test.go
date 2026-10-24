@@ -41,7 +41,8 @@ func TestMigrateIsIdempotentAndCreatesTheWholeSchema(t *testing.T) {
 		}
 	}
 
-	// 表数与清单对表 docs/db-schema.md §1：run schema 五张（strategy_state 不在此，H5 裁决）。
+	// 表数与清单对表 docs/db-schema.md §1：run schema 六张（裁-13 起含 parent_jobs；
+	// strategy_state 不在此，H5 裁决）。
 	var tables []string
 	rows, err := store.Pool().Query(ctx, `
 		SELECT table_name FROM information_schema.tables
@@ -57,7 +58,7 @@ func TestMigrateIsIdempotentAndCreatesTheWholeSchema(t *testing.T) {
 		tables = append(tables, n)
 	}
 	rows.Close()
-	want := []string{"backtest_jobs", "batch_runs", "run_artifacts", "walk_forward_reports", "worker_registry"}
+	want := []string{"backtest_jobs", "batch_runs", "parent_jobs", "run_artifacts", "walk_forward_reports", "worker_registry"}
 	if strings.Join(tables, ",") != strings.Join(want, ",") {
 		t.Fatalf("run schema tables = %v, want %v", tables, want)
 	}
@@ -66,7 +67,9 @@ func TestMigrateIsIdempotentAndCreatesTheWholeSchema(t *testing.T) {
 	for _, idx := range []string{
 		"backtest_jobs_idempotency_key_uidx", "backtest_jobs_claim_idx",
 		"backtest_jobs_worker_idx", "backtest_jobs_created_idx", "backtest_jobs_result_status_idx",
+		"backtest_jobs_parent_idx",
 		"batch_runs_idempotency_key_uidx", "walk_forward_reports_idempotency_key_uidx",
+		"parent_jobs_idempotency_key_uidx", "parent_jobs_kind_status_idx",
 	} {
 		var n int
 		if err := store.Pool().QueryRow(ctx,
@@ -335,5 +338,80 @@ func TestRegistryQueriesUseTheSameConnectionPoolAcrossPorts(t *testing.T) {
 	_, err := q.Claim(ctx, "w2", time.Minute)
 	if !errors.Is(err, queue.ErrWorkerDraining) {
 		t.Fatalf("draining worker = %v, want ErrWorkerDraining", err)
+	}
+}
+
+// TestPGParentStoreRoundTrip 是裁-13 的 PG 腿：父表写入 / 幂等重放 / 冲突 /
+// 汇总写回 / 子 run 的 parent_job_id 外键，全部在真库上跑一遍。
+func TestPGParentStoreRoundTrip(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	parents := store.Parents()
+
+	canonical := `{"kind":"batch","units":2,"children":[]}`
+	hash, err := queue.RequestHash([]byte(canonical))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &queue.ParentRecord{
+		IdempotencyKey: "parent-key-1",
+		Kind:           queue.ParentBatch,
+		PlanCanonical:  canonical,
+		PlanHash:       hash,
+		Status:         queue.RunRunning,
+		Total:          2,
+	}
+
+	created, ok, err := parents.EnqueueParent(ctx, rec)
+	if err != nil || !ok {
+		t.Fatalf("EnqueueParent: created=%v err=%v", ok, err)
+	}
+	if created.ID == "" || created.PlanHash != hash || created.Total != 2 {
+		t.Fatalf("row = %+v", created)
+	}
+
+	replayed, ok, err := parents.EnqueueParent(ctx, rec)
+	if err != nil || ok {
+		t.Fatalf("replay: created=%v err=%v", ok, err)
+	}
+	if replayed.ID != created.ID {
+		t.Fatalf("replay id = %s, want %s", replayed.ID, created.ID)
+	}
+
+	conflict := *rec
+	conflict.PlanCanonical = `{"kind":"batch","units":3,"children":[]}`
+	conflict.PlanHash = ""
+	conflict.Total = 3
+	if _, _, err := parents.EnqueueParent(ctx, &conflict); !errors.Is(err, queue.ErrIdempotencyConflict) {
+		t.Fatalf("different plan: err = %v, want ErrIdempotencyConflict", err)
+	}
+
+	summary, err := parents.SaveParentSummary(ctx, created.ID, queue.ParentSummary{
+		Status: queue.RunCompleted, Total: 2, Completed: 1, Invalid: 1,
+		SummaryJSON: []byte(`{"tasks":[1,2]}`),
+	})
+	if err != nil {
+		t.Fatalf("SaveParentSummary: %v", err)
+	}
+	if summary.Status != queue.RunCompleted || summary.Completed != 1 || summary.Invalid != 1 || summary.CompletedAt.IsZero() {
+		t.Fatalf("summary = %+v", summary)
+	}
+
+	if _, err := parents.GetParent(ctx, "missing-parent"); !errors.Is(err, queue.ErrParentNotFound) {
+		t.Fatalf("unknown parent: err = %v, want ErrParentNotFound", err)
+	}
+
+	// 子 run 关系：parent_job_id 必须能写能读（FK 由库执行）。
+	q := store.Queue(nil, pgstore.Options{})
+	child, _, err := q.Enqueue(ctx, &queue.RunRecord{
+		IdempotencyKey: "parent-child-1",
+		ParentJobID:    created.ID,
+		RequestJSON:    []byte(`{"strategy":"momentum"}`),
+	})
+	if err != nil {
+		t.Fatalf("enqueue child: %v", err)
+	}
+	if child.ParentJobID != created.ID {
+		t.Fatalf("child parent_job_id = %q, want %q", child.ParentJobID, created.ID)
 	}
 }

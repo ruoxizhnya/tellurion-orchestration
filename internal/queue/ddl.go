@@ -130,6 +130,44 @@ var migrations = []string{
 		started_at         TIMESTAMPTZ,
 		meta               JSONB
 	)`,
+
+	// ── 2026-10-25 裁-13（R6 已裁）：父计划一张表 + 子 run 关系一列 ──────────
+	//
+	// 为什么是一张表而不是 batch_runs / walk_forward_reports 两张：两种父共用
+	// 同一套生命周期与三值汇总口径，`internal/plansuite` 已经在钉「不各写一套」；
+	// 形状差异（窗口配置）落在 `plan_canonical` 里，不再复制一份 `request_json`。
+	//
+	// 身份 = `plan_canonical`（TEXT 字节锚点）+ `plan_hash`：与
+	// `backtest_jobs.request_canonical` 同一条实测教训（JSONB 会规范化数字文本，
+	// 拿它复算 hash 会把同一次提交判成两次）。
+	`CREATE TABLE IF NOT EXISTS run.parent_jobs (
+		parent_job_id   TEXT PRIMARY KEY,
+		idempotency_key TEXT,
+		kind            TEXT NOT NULL CHECK (kind IN ('batch','walkforward')),
+		plan_canonical  TEXT NOT NULL,
+		plan_hash       CHAR(64) NOT NULL,
+		status          TEXT NOT NULL DEFAULT 'pending'
+		                CHECK (status IN ('pending','running','cancelling','completed','failed','cancelled')),
+		total           INT NOT NULL DEFAULT 0,
+		completed       INT NOT NULL DEFAULT 0,
+		invalid         INT NOT NULL DEFAULT 0,
+		failed          INT NOT NULL DEFAULT 0,
+		summary_json    JSONB,
+		created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+		completed_at    TIMESTAMPTZ
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS parent_jobs_idempotency_key_uidx
+		ON run.parent_jobs (idempotency_key) WHERE idempotency_key IS NOT NULL`,
+	`CREATE INDEX IF NOT EXISTS parent_jobs_kind_status_idx
+		ON run.parent_jobs (kind, status, created_at DESC)`,
+
+	// 子 run 关系：一列可空外键（裁-13 明确不塞 request_json 父元数据）。
+	// 用 ALTER 而不是改上面 CREATE TABLE 原文：这套表此前已落过真库，
+	// 迁移只前滚（docs/db-schema.md §4）。
+	`ALTER TABLE run.backtest_jobs
+		ADD COLUMN IF NOT EXISTS parent_job_id TEXT REFERENCES run.parent_jobs (parent_job_id) ON DELETE SET NULL`,
+	`CREATE INDEX IF NOT EXISTS backtest_jobs_parent_idx
+		ON run.backtest_jobs (parent_job_id) WHERE parent_job_id IS NOT NULL`,
 }
 
 // Migrations 返回 DDL 的副本：调用方只能按序执行，不能改切片的元素。

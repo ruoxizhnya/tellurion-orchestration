@@ -138,7 +138,7 @@ func (s *Store) Registry() *Registry { return &Registry{pool: s.pool} }
 // （裸列给 SELECT，带 `j.` 前缀给 UPDATE ... FROM —— 那里的裸 `id` 是歧义的：
 // 外层表 j 与子查询 c 都有 id 列）。一张表两处写必然漂移。
 var jobCols = []string{
-	"id", "idempotency_key", "request_hash", "request_canonical", "status", "result_status",
+	"id", "idempotency_key", "parent_job_id", "request_hash", "request_canonical", "status", "result_status",
 	"priority", "attempts", "max_attempts", "worker_id", "lease_until", "cancel_requested",
 	"error_message", "result_uri", "created_at", "started_at", "completed_at",
 }
@@ -178,11 +178,12 @@ func rowToJob(row pgx.Row) (*queue.RunRecord, error) {
 	var (
 		rec                                queue.RunRecord
 		idemKey, resultStatus              sql.NullString
+		parentJobID                        sql.NullString
 		workerID, errorMessage, resultURI  sql.NullString
 		requestHash, status                string
 		leaseUntil, startedAt, completedAt sql.NullTime
 	)
-	err := row.Scan(&rec.ID, &idemKey, &requestHash, &rec.RequestJSON, &status, &resultStatus,
+	err := row.Scan(&rec.ID, &idemKey, &parentJobID, &requestHash, &rec.RequestJSON, &status, &resultStatus,
 		&rec.Priority, &rec.Attempts, &rec.MaxAttempts, &workerID, &leaseUntil, &rec.CancelRequested,
 		&errorMessage, &resultURI, &rec.CreatedAt, &startedAt, &completedAt)
 	if err != nil {
@@ -190,6 +191,7 @@ func rowToJob(row pgx.Row) (*queue.RunRecord, error) {
 	}
 	rec.Status = queue.RunStatus(status)
 	rec.IdempotencyKey = idemKey.String
+	rec.ParentJobID = parentJobID.String
 	// CHAR(64) 用空格补齐；64 位十六进制本来不含空格，补齐只可能来自存量脏数据。
 	rec.RequestHash = strings.TrimRight(requestHash, " ")
 	rec.ResultStatus = queue.ResultStatus(resultStatus.String)

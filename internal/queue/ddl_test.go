@@ -14,13 +14,15 @@ func TestMigrationsCoverAllRunTables(t *testing.T) {
 		t.Fatalf("first statement must create the run schema, got %q", stmts[0])
 	}
 
-	// 五张表（docs/db-schema.md §1）：少一张就是没落地，多一张要走 ADR。
+	// 六张表（docs/db-schema.md §1；parent_jobs 是裁-13 新增）：少一张就是没落地，
+	// 多一张要走 ADR。
 	want := []string{
 		"run.backtest_jobs",
 		"run.run_artifacts",
 		"run.batch_runs",
 		"run.walk_forward_reports",
 		"run.worker_registry",
+		"run.parent_jobs",
 	}
 	joined := strings.Join(stmts, "\n")
 	for _, table := range want {
@@ -40,10 +42,22 @@ func TestMigrationsCoverAllRunTables(t *testing.T) {
 		}
 	}
 	// 创建索引的语句也必须带 IF NOT EXISTS（上面已覆盖，这里单列判据防误改）。
-	if !strings.Contains(joined, "CREATE UNIQUE INDEX IF NOT EXISTS backtest_jobs_idempotency_key_uidx") {
+	// 断言到 `ON <table>` 为止：只比索引前缀时，`…_idx_LEG3` 这类改名会假绿。
+	normalized := normalizedOf(joined)
+	if !strings.Contains(normalized, "CREATE UNIQUE INDEX IF NOT EXISTS backtest_jobs_idempotency_key_uidx ON run.backtest_jobs") {
 		t.Fatal("idempotency key unique index is missing")
 	}
+	// 裁-13：子 run 关系是一列 + 索引，不是父表里的 request_json。
+	if !strings.Contains(normalized, "ALTER TABLE run.backtest_jobs ADD COLUMN IF NOT EXISTS parent_job_id") {
+		t.Fatal("backtest_jobs.parent_job_id column is missing")
+	}
+	if !strings.Contains(normalized, "CREATE INDEX IF NOT EXISTS backtest_jobs_parent_idx ON run.backtest_jobs") {
+		t.Fatal("backtest_jobs.parent_job_id index is missing")
+	}
 }
+
+// normalizedOf 把一段 SQL 的空白折成单空格，便于子串断言（DDL 里有换行与缩进）。
+func normalizedOf(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 func TestMigrationsReturnsCopy(t *testing.T) {
 	first := Migrations()

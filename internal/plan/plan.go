@@ -8,8 +8,8 @@
 //   - **不执行**回测：子 run 只是完整的 RunSpec，入队与执行归 JobQueue / worker；
 //   - **不解析结果内容**：汇总只吃 K9 `result_status` 与调用方给的可选 score，
 //     `run` schema 只存指针，不存结果明细；
-//   - **不改 `run` schema**：R6（子 run 关系）未裁前不建第六张表，也不给子 run 的
-//     `request_json` 偷偷塞父元数据——那会改动 request_hash 的语义。
+//   - **只产出身份，不写表**：`ParentPlan` 的 canonical / hash 由 `internal/parents`
+//     写进 `run.parent_jobs`（裁-13），本层不碰 store。
 package plan
 
 import (

@@ -37,6 +37,16 @@ func tradingDays(n int) []time.Time {
 	return out
 }
 
+// wfParent 是共享套件的父计划夹具：与 Plan 用的是同一次展开。
+func wfParent(t *testing.T) plan.ParentPlan {
+	t.Helper()
+	pp, err := plan.BuildWalkForwardPlan(json.RawMessage(walkForwardBase), wfConfig, tradingDays(10))
+	if err != nil {
+		t.Fatalf("BuildWalkForwardPlan: %v", err)
+	}
+	return pp
+}
+
 func walkForwardSubject() plansuite.Subject {
 	return plansuite.Subject{
 		Name:     "WalkForward",
@@ -45,11 +55,11 @@ func walkForwardSubject() plansuite.Subject {
 		UnitSize: 2,
 		Plan: func(t *testing.T) []plan.Child {
 			t.Helper()
-			children, err := plan.ExpandWalkForward(json.RawMessage(walkForwardBase), wfConfig, tradingDays(10))
-			if err != nil {
-				t.Fatalf("ExpandWalkForward: %v", err)
-			}
-			return children
+			return wfParent(t).Children
+		},
+		Parent: func(t *testing.T) plan.ParentPlan {
+			t.Helper()
+			return wfParent(t)
 		},
 		Summarize: func(t *testing.T, outcomes []plansuite.Outcome) (plan.Counts, plan.ParentStatus) {
 			t.Helper()

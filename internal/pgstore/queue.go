@@ -98,16 +98,17 @@ func (q *Queue) Enqueue(ctx context.Context, rec *queue.RunRecord) (*queue.RunRe
 		// 空格），锚点即刻失效。真库实测见 hashanchor_test.go。
 		_, err := tx.Exec(ctx, `
 			INSERT INTO run.backtest_jobs
-				(id, idempotency_key, request_hash, request_json, request_canonical,
+				(id, idempotency_key, parent_job_id, request_hash, request_json, request_canonical,
 				 status, result_status, priority, attempts, max_attempts,
 				 worker_id, lease_until, cancel_requested, error_message, result_uri,
 				 created_at, started_at, completed_at)
 			VALUES
-				($1, $2, $3, CAST($4::text AS jsonb), $4::text,
+				($1, $2, $8, $3, CAST($4::text AS jsonb), $4::text,
 				 'pending', NULL, $5, 0, $6,
 				 NULL, NULL, FALSE, NULL, NULL,
 				 $7, NULL, NULL)`,
-			id, rec.IdempotencyKey, sum, string(canonical), rec.Priority, maxAttempts, createdAt)
+			id, rec.IdempotencyKey, sum, string(canonical), rec.Priority, maxAttempts, createdAt,
+			nullableText(rec.ParentJobID))
 		if isUniqueViolation(err) {
 			// 幂等键的重复已在锁内查过，这里唯一能撞的就是主键：与内存实现同一条错误。
 			return fmt.Errorf("%w: duplicate run id %q", queue.ErrInvalidInput, id)
