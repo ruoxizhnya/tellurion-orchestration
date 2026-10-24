@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-24
-verified-by: QT-44 施工 ①②③④⑤（④ = R8 / R9 裁决落地；⑤ = R10 心跳超时 → offline，两个实现同批）
+verified-by: QT-44 施工 ①②③④⑤⑥（④ = R8 / R9 裁决落地；⑤ = R10 心跳超时 → offline，两个实现同批；⑥ = X5b 规划与汇总 + 共享套件）
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -68,6 +68,19 @@ verified-by: QT-44 施工 ①②③④⑤（④ = R8 / R9 裁决落地；⑤ = R
 
 
 >
+> **施工记录（2026-10-24，施工 ⑥：工单 P5-2「X5b batch / walkforward 窗口切分与汇总」）**：本轮只做**规划与汇总**，不做父表持久化、不做 HTTP 端点、不动 `run` schema。
+> **落点**：`internal/plan`（纯函数，零第三方依赖）——`ExpandBatch`（网格笛卡尔积 + `strategy_params` 浅合并）、`SplitWindows` / `ExpandWalkForward`（交易日切窗 + 只改 `start_date` / `end_date` 派生 train/test）、`AggregateBatch` / `AggregateWalkForward`（三值计数、排名、父状态）；`internal/plansuite`（**共享套件**：7 条用例同时跑在 batch 与 walkforward 两个 Subject 上）。
+> **口径（写进代码注释，不是口头约定）**：① batch 参数名按字典序、最后一个参数变化最快，展开上限 100（与 core REV-11 同值），空网格 / 空取值 / 非标量 / 尾随内容 / 超限 → `ErrInvalidRequest`（HTTP 层映射 `invalid_params`）；② walkforward 只生成**完整**窗口（train/test 各按交易日数），`step_days` 必须为正，日历必须严格递增（不偷偷排序），train/test 首尾相接不重叠，`min_train_days` 空 = `train_days/2`（固定窗口下恒成立）；③ 子 run 只改日期，kernel / fill_timing / seed / strategy_params / strategy_ref 原样保留；④ 汇总三值分开（`invalid` **不得**算成 `completed`），batch 必须传计划总数且与逐条回报数一致（漏报即拒），walkforward 缺段 / 缺窗算 pending；只对 `completed` 且给出有限 score 的子 run 排名（同分按 `run_id` 升序），`invalid` / `failed` 保留但 `rank=0`；⑤ 父状态：还有未回报 → `running`，任一 failed → `failed`（**不吞**子失败），否则 `completed`（`invalid` 不拖成 failed）。
+> **R6 未裁的处置**：不建第六张表、不塞 `request_json` 父元数据、不写 `batch_runs` / `walk_forward_reports` 行。因此本轮产出是**可复用的规划与汇总层**，不是可提交 / 可落库的 batch/wf 端点；`run` 五表语义一字未改（`internal/queue/ddl.go` 零改动）。
+> **套件计数**（`go test -v` 实测，不手数）：`internal/plan` 22 个顶层用例 / 53 条含子测试；共享套件在每个 Subject 上 7 条（`PlanIsDeterministic` / `EveryChildIsACompleteRunSpec` / `SummaryCountsThreeValuesWithoutCollapsing` / `InvalidIsNotAFailure` / `AnyFailureFailsTheParent` / `AllFailuresAreNotAnEmptySuccess` / `PendingKeepsTheParentRunning`）。**X5c 复核**：内存腿的 `ReapOfflineMarksStaleWorkersOffline` / `ReapOfflineRejectsNonPositiveTimeout` / `OfflineWorkerRevivesOnProofOfLifeUnlessDrained` / `OfflineWorkerIsNotDispatchedUntilProofOfLife` 全绿；PG 腿仍因本机无库 `skip`（施工 ⑤ 已如实登记，不是本轮新增缺口）。
+> **破坏验证（四条腿，改坏 → 红 → 逐字节还原 → 绿）**。还原用 sha256 比对（`internal/plan/batch.go` = `ab51cd70…`、`internal/plan/walkforward.go` = `c3d33894…`、`internal/plan/aggregate.go` = `86cfd1c8…`，每条腿跑完都验一次还原相同）：
+> 1. **batch：丢掉网格值合并**（`merged[k] = v` 那一行改成空操作）→ `TestExpandBatchMergesGridAndKeepsBaseParams` 红：`child 1 lookback = 20, want 10`。
+> 2. **batch 汇总：`invalid` 计成 `completed`** → 共享套件 Batch 侧三条红（`SummaryCountsThreeValuesWithoutCollapsing` / `InvalidIsNotAFailure` / `AnyFailureFailsTheParent`）+ `TestAggregateBatchRanksOnlyCompletedWithScore` 红；报错是计数错位，不是编译错。
+> 3. **walkforward：`testStart` 改成 `trainEnd`**（训练与验证重叠一个交易日）→ `TestSplitWindowsExactBoundaries` 红：`window 1 test = 2024-01-04..2024-01-05`。
+> 4. **walkforward 汇总：窗口 `invalid` 计成 `completed`** → 共享套件 WalkForward 侧同样三条红，与第 2 条**同一批断言**——这就是「两种父不各写一套汇总口径」的可执行形式。
+> **门禁**：`gofmt -l .` 空；`go build ./...` / `go vet ./...` / `go test ./... -count=1` 全绿（无 DSN，PG 腿 skip）；输出见提交记录。本机 `-race` 仍跑不了（`CGO_ENABLED=0`、无 C 编译器）。
+> **验收对照（本轮工单）**：① 网格展开 / 窗口切分 / 三值汇总有**共享套件**——`internal/plansuite` 同跑 batch 与 walkforward，7 条/Subject，全绿。② **不改 `run` schema 已冻结的 5 表语义**——`internal/queue/ddl.go` 与 `docs/db-schema.md` 的表结构零改动；R6 未裁前不建表、不塞父元数据。③ 未落项如实登记：`batch_runs` / `walk_forward_reports` 写入、batch/walkforward 4 端点、`TradingCalendar` 只读 port 接线、子 run 入队、worker 执行、R6 子 run 关系。
+
 > **⚠️ 工单 G7 的两条验收前提被源码证伪（2026-10-23 实测，如实登记，不当已完成）**：
 > 1. **「`pkg/backtest` 里 `job|batch|walkforward` 零命中」不是本仓能产出的判据**：core `pkg/backtest` 实测 **1032 处命中 / 39 个文件**（`job/job.go` 207、`batch/batch.go` 67、`walkforward/walkforward.go` 34、`aliases.go` 39…）。达成它要的是 core 侧 O3（`tellurion:docs/design/qt-decoupling/orchestration-service-design.md` §7「编排层整体移出 `pkg/backtest`」），而 R1 与本仓 `db-schema.md` §5 冻结的路径是「双写 → 对拍 → 切读 → 停写」——旧路径在 O0 切换前**必须继续服务**。本仓能做的是把 durable 侧与 port 做出来，不能单方面让别人的包变空。
 > 2. **「同一 batch 在服务与旧路径结果一致」与同一张工单的第 2 步自相矛盾**：core 的 batch 只要 `err == nil` 就记 `completed`、从不读 `resp.Status`（`core:pkg/backtest/batch/batch.go:249`），`toBacktestResult` 又把 status 字段丢掉（`:412-446`），于是 K9 `invalid` 被算进 `completed` / `success_count` / 评分均值；工单第 2 步又要求「批量报告不得把 `invalid` 当成功」。**修掉它的代价就是数字不再与旧路径相同**。本仓按「必须相同的部分（网格展开、窗口集合、逐 run 请求派生）钉一致，故意不同的部分（三值计数、失败窗口显式计数）钉分歧」执行，并在 X5b 的验收里逐条写明哪条是哪种。
@@ -99,7 +112,7 @@ verified-by: QT-44 施工 ①②③④⑤（④ = R8 / R9 裁决落地；⑤ = R
 | 阶段 | 内容 | 上游单号 | 前置 |
 |---|---|---|---|
 | X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① `internal/queue` 语义；② jobs 4 端点 HTTP 面；③ **DDL 已接 PG + 启动迁移 + 双实现共享用例**；④ R8 回收出口 + R9 `ClaimByKernel` 落两个实现）| `QT-44` | 本仓立项 |
-| X5b | batch + walkforward（窗口切分与汇总） | `QT-44` | X5a |
+| X5b | batch + walkforward（窗口切分与汇总）✅ 规划与汇总纯函数 + 共享套件（2026-10-24 施工 ⑥）；**父表写入 / 端点 / worker 执行未落**，见 QT-44 施工 ⑥ | `QT-44` | X5a |
 | X5c | worker 注册 / 心跳 / `drain` / 心跳超时 🔶（施工 ① 内存；③ PG 已落；⑤ 心跳超时→`offline` 两个实现同批 + `cmd` 接线；worker 进程本身未做） | `QT-44` | X5a |
 | X0 | `run_artifacts` 三 hash 留痕 + `/provenance` | `QT-03` | X5a |
 

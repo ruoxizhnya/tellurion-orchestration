@@ -1,6 +1,6 @@
 # tellurion-orchestration
 
-> module: `tellurion-orchestration` ｜ 状态：**已启动（施工 ①②③）**——X5a/X5c 语义 + jobs 4 端点 + **PG 实现与启动迁移**已落；X5b（batch/walkforward）与 X0（`run_artifacts`/`provenance`）未做（`cmd/dualrun` 已裁决留 core，不在本仓）
+> module: `tellurion-orchestration` ｜ 状态：**已启动（施工 ①②③④⑤⑥）**——X5a/X5c 语义 + jobs 4 端点 + **PG 实现与启动迁移**已落；X5b 的**规划与汇总**已落（`internal/plan` + 共享套件），父表写入 / 端点未落（等 R6）；X0（`run_artifacts`/`provenance`）未做（`cmd/dualrun` 已裁决留 core，不在本仓）
 
 编排 / worker 服务：job / batch / walkforward 的算力出口，schema `run`。把"批量扫"从 core 进程里搬出来。
 
@@ -10,9 +10,11 @@
 |---|---|
 | `internal/queue/` | `JobQueue` / `WorkerRegistry` port + 内存实现 + `run` schema DDL（X5a/X5c） |
 | `internal/pgstore/` | 同一对 port 的 PostgreSQL 实现 + `Open`/`Migrate`（驱动只进这一个包） |
-| `internal/qtest/` | 语义套件：内存与 PG **共用**的 41 条用例（每个实现各跑一遍；判据「换实现行为不变」） |
+| `internal/qtest/` | 语义套件：内存与 PG **共用**的 45 条用例（每个实现各跑一遍；判据「换实现行为不变」） |
 | `internal/testdb/` | PG 腿的 harness：跨测试进程排队 + 每用例前清库 |
 | `internal/httpapi/` | jobs 4 端点的 HTTP 面（X5a 的传输层） |
+| `internal/plan/` | batch 网格展开 / walkforward 窗口切分 / 三值汇总与父状态（X5b） |
+| `internal/plansuite/` | 规划 / 汇总共享套件（同跑 batch 与 walkforward） |
 | `cmd/orchestrationservice/` | 进程装配：DSN fail-closed → 启动迁移 → 监听 → 周期租约回收 |
 | `docs/` | 本仓文档：台账 / 边界 / 决策 / 归档 —— 从这里进：`docs/README.md` |
 | `AGENTS.md` | 本仓入口（构建、边界、禁止、依赖版本） |

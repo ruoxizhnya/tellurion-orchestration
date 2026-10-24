@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-24
-verified-by: 施工 ⑤（R10 心跳超时 → `offline` 已落两个实现，`cmd` 周期回收同批调用；链路与不变量 4 同步）
+verified-by: 施工 ⑤（R10 心跳超时 → `offline`）+ 施工 ⑥（X5b 规划 / 汇总纯函数；父表写入与端点未落，链路 9/10 同步）
 ---
 
 # Dataflow — tellurion-orchestration
@@ -52,7 +52,9 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 **批量 / 前向**
 
 9. `POST /api/runs/batch` / `POST /api/runs/walkforward` → 父记录 `pending` + 展开子 run（每个子 run 一行 `backtest_jobs`，各自 provenance）；父报告只汇总计数与排序，不复制每个结果的内容。
+   - **规划已落（施工 ⑥，X5b）**：`internal/plan.ExpandBatch`（网格笛卡尔积，网格值浅合并进 `strategy_params`）、`internal/plan.ExpandWalkForward`（只生成完整窗口；train/test 只替换 `start_date` / `end_date`，其余 RunSpec 字段原样保留）。**未落**：父记录写入（`batch_runs` / `walk_forward_reports`）、batch/walkforward 4 端点、子 run 入队；R6 未裁前不建第六张表、不塞父元数据。
 10. 子 run 的 `result_status` 逐条可见：`completed` 才进排名 / 聚合；`invalid` / `failed` 显式计数，不静默丢弃。所有窗口失败 → 父 `failed`，不是"成功的空报告"。
+   - **汇总已落（施工 ⑥）**：`AggregateBatch`（必须传计划总数 `plannedTotal`，与逐条回报数不符即拒——漏报不会被当成完成；只对 `completed` 且给出有限 score 的子 run 排名，同分按 `run_id` 升序；`invalid` / `failed` 保留但 `rank=0`）与 `AggregateWalkForward`（单段失败 = 整窗失败；缺段 / 缺窗算 pending）。父状态三条：还有未回报 → `running`；任一 `failed` → `failed`；否则 `completed`（`invalid` 不拖成 `failed`）。评分由执行侧给，本仓不解析结果内容。
 
 ## 3. 失败模式（每一处 fail-closed 都要能指名）
 

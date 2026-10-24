@@ -70,7 +70,7 @@ tellurion-orchestration ──► core 引擎（派活）
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | X5a | job 队列 + 状态机 + 幂等 | ✅ 内存 + PG 两个实现 + jobs 4 端点（施工 ②③④）；R8/R9 已落，见 §9.8 |
-| X5b | batch + walkforward | ⬜ |
+| X5b | batch + walkforward | 🔶 规划与汇总纯函数已落（施工 ⑥：网格展开 / 窗口切分 / 三值汇总 + 共享套件）；HTTP 端点与 `batch_runs` / `walk_forward_reports` 写入未落 |
 | X5c | worker 注册 / 心跳 / drain / 心跳超时 | 🔶 注册 / 心跳 / drain / 心跳超时 → `offline` 已落（内存 + PG，施工 ⑤）；worker 进程本身未做（派活契约未定），见 §9.8 |
 | X0 | 三 hash 留痕（`run_artifacts`） | ⬜ |
 
@@ -289,7 +289,7 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | R3 | **per-run seed / 策略参数** | `BacktestRequest` 没有 `Seed` 与 `StrategyParams`；seed 是进程级 `Config.Seed`（`pkg/backtest/engine.go:35`），params 只有默认值（`pkg/backtest/provenance.go:226`） | interim：编排配置固定 worker seed、同部署同值，`run_spec_hash` 记生效 seed；per-run 覆写要改冻结的 RunSpec（QT-21 / SPEC 评审），不在 QT-44 擅改 |
 | R4 | **`JobQueue` port 的归属与版本** | contracts 今天 `JobQueue` 零命中；本仓是 S0 占位；core 需要 adapter | S1 迁 contracts（core adapter + 本仓实现 = 两个使用方，满足 ADR-0001 ①）；先在本仓落同名接口，contracts 发布后切 import。`RunStateStore` **不新增**（H5 作废） |
 | R5 | **鉴权与 worker 身份** | C 组全部端点未实现；worker_id 可伪造；`/api/runs/*` 与 QT-50 ④ 的鉴权矩阵未合流 | 与 QT-50 ④ 同一套 `unauthenticated` / `forbidden`；worker 注册必须带凭证（不能只报一个 id）；`drain` 只能由运维角色调用 |
-| R6 | **batch / walkforward 的子 run 关系** | 每个 task / 窗口都是独立 run，但 `run` schema 只有 5 张表；直接在 `backtest_jobs` 加 `parent_id` 会跨表引用两种父（batch / wf） | 二选一：(a) `run.run_children(parent_kind, parent_id, child_run_id)` 第六张表（结构变更走 ADR）；(b) 子 run 的 `request_json` 带 `parent` 元数据、父表存 `child_run_ids TEXT[]`。**倾向 (a)**：可查询、可加唯一约束 |
+| R6 | **batch / walkforward 的子 run 关系** | 每个 task / 窗口都是独立 run，但 `run` schema 只有 5 张表；直接在 `backtest_jobs` 加 `parent_id` 会跨表引用两种父（batch / wf）。**2026-10-24 施工 ⑥ 实测口径**：X5b 的规划/汇总层不依赖该裁决，故**未裁也未绕过**——不建第六张表、不塞 `request_json` 父元数据、不写父表 | 二选一：(a) `run.run_children(parent_kind, parent_id, child_run_id)` 第六张表（结构变更走 ADR）；(b) 子 run 的 `request_json` 带 `parent` 元数据、父表存 `child_run_ids TEXT[]`。**倾向 (a)**：可查询、可加唯一约束。**裁决前置**：父记录持久化前必须先定，否则子 run 与父记录无法建立可查询的关系 |
 | R7 | **队列深度与 `queue_full` 阈值** | 今天无上限（每 job 一个 goroutine）；429 语义在新端点冻结，但阈值是部署配置 | 契约只冻结「达上限 → 429 + `queue_full`」；默认值由部署配置给出（建议 `max_pending = worker 数 × 4`，压测后定），不进契约 |
 | R8 | **`cancelling` 行的租约回收出口**（2026-10-23 施工 ① 新登记；**已裁 2026-10-23 = 选 (a)**；**已落 施工 ④，两个实现同批**） | §9.5 的 `ReapExpired` 只定义了 `running` 的回收：`cancelling` 行的 owner 若崩溃，`AckCancel` 因租约过期拒绝、`ReapExpired` 又不处理它——该行会永久停在中间态 | ✅ 落地形状：`ReapExpired` 的第二类迁移「`cancelling` 且租约过期 → `cancelled`」，**不**计 attempts（它不是重试，是给已作废的结果收尾）。内存侧在 `Memory.ReapExpired` 的分支里；PG 侧是 `reapCancellingSQL` 这条**独立语句**（`reapSQL` 保持原样：两条判据不同形就不合并成一条带 CASE 的 UPDATE）。钉子：`qtest.ReapLandsOrphanedCancellingRow`（两侧同跑），破坏腿见 `docs/TASKS.md` 施工 ④ |
 | R9 | **按内核能力（`Kernels`）领取过滤**（2026-10-23 施工 ① 自审新登记；**已裁 2026-10-23 = 加可选新接口（MINOR）——既不是 (a)，也不是当初倾向的 (b)**；**已落 施工 ④**） | §9.3 写 `Kernels` 用于"未知内核的 worker 不接该活"，但 §9.2 冻结的 `Claim(ctx, workerID, lease)` **没有内核参数**——过滤无法在领取点实现；`WorkerRecord.Kernels` 落了库但没有消费方 | ✅ 落地形状：新接口 `KernelAwareJobQueue.ClaimByKernel`——§9.6「加可选能力走新接口 = MINOR」那条的第一次实际使用，冻结的 10 方法集一字未动（(a) 会破 §9.6，(b) 会让能力声明继续只落库）。能力取 worker **在注册表里声明的** `Kernels`，不是调用方现传；未注册 / 无声明 / 注册表未装配 ⇒ 不过滤。行的生效内核抽取规则见 §9.2 那条口径（只有 JSON 字符串算内核）。钉子：`ClaimByKernelReadsOnlyStringKernels`（两侧同口径）+ `ClaimWithoutKernelFilterStaysUnfiltered`（证明冻结面没被顺手加上过滤）。**仍未落**：worker 进程本身（本仓没有引擎），消费方目前只有套件与两个编译期断言 |
@@ -328,6 +328,8 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | `internal/pgstore/queue.go` | `JobQueue` 的 PG 实现 10 方法 + 可选的 `ClaimByKernel`：`Claim`/`ClaimByKernel` 共用**一条** `claimSQL`（`$4::text[]` 传 NULL 即不过滤，两个入口不会各写一份 SQL 而漂掉），`FOR UPDATE SKIP LOCKED` + `priority DESC → created_at → id`；`Enqueue` 在 `pg_advisory_xact_lock` 里做「查键 → 数深度 → 插行」；终态方法先锁行再按 §9.5 两轴映射表判定；回收是 `reapSQL`（running）+ `reapCancellingSQL`（R8）两条语句、**同一个事务**（否则半迁移态配一个 count 返回值是错的） | X5a 的 durable 侧 |
 | `internal/pgstore/registry.go` | `WorkerRegistry` 的 PG 实现（UPSERT 保 status/started_at/drain 时刻；offline 的复活与心跳刷新是同一条 UPDATE 的 CASE）+ `reapOfflineSQL`（R10） | X5c 的 durable 侧 |
 | `internal/qtest/suite.go` | **语义套件**：30 条队列用例 + 9 条注册表用例 + 6 条跨 port 用例 = 每个实现 45 条（施工 ⑤ 新增 3 条注册表 + 1 条跨 port），内存与 PG 各跑一遍 | §9.8「换 PG 实现时行为不变」的可执行判据 |
+| `internal/plan/` | **batch / walkforward 规划与汇总**（施工 ⑥，X5b）：`ExpandBatch`（网格笛卡尔积 + `strategy_params` 浅合并）、`SplitWindows` / `ExpandWalkForward`（交易日切窗 + 只改日期派生 train/test）、`AggregateBatch` / `AggregateWalkForward`（三值计数、只对 completed 且给分者排名、父状态判定） | §9.8 施工 ⑥、`dataflow.md` §2 第 9/10 步 |
+| `internal/plansuite/suite.go` | **规划 / 汇总共享套件**（施工 ⑥）：7 条共享用例同时跑在 batch 与 walkforward 两个 Subject 上（确定性、完整 RunSpec 保留、三值计数、invalid≠failed、部分失败、全失败、pending）；不依赖任何存储实现 | §9.8「两种父记录不各写一套汇总口径」的可执行判据 |
 | `internal/testdb/testdb.go` | PG 腿 harness：跨测试**进程**的会话级 advisory lock + 每用例前清库 | 见下方「施工 ③ 的三条实测」第 3 条 |
 | `cmd/orchestrationservice/main.go` | 进程装配：`-dsn`/`ORCHESTRATION_DSN`（两者都空即拒绝启动）→ `Migrate` → 监听（`127.0.0.1:8088`，jobs 4 端点 + `/healthz`）+ 周期回收（`-reap-interval` 默认 30s：租约 `ReapExpired` + 心跳 `ReapOffline`，后者由 `-heartbeat-timeout` 默认 90s 控制，0 = 关闭；开启时装配期 fail-closed 检查注册表确实实现了 `WorkerReaper`） | §9.5 建表入口、`dataflow.md` §2 第 7/8 步 |
 | `internal/pgstore/*_test.go` | PG 专属腿：迁移幂等 + 表/索引形状、列清单双向核对、`CHAR(64)` 补齐、三条库约束（唯一索引 / 两个 CHECK / FK）、租约谓词、`request_canonical` 锚点、并发领取不重发 | 破坏验证的落点 |
@@ -359,7 +361,8 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | 按内核能力（`Kernels`）过滤领取 | ✅ 内存 + PG（施工 ④，R9 裁决落地）——可选接口 `KernelAwareJobQueue.ClaimByKernel`；抽取规则两侧同口径由 `ClaimByKernelReadsOnlyStringKernels` 钉住。**消费方仍是空的**：本仓没有 worker 进程，目前只有套件与两个编译期断言用到它 |
 | `cancelling` 行的租约回收出口 | ✅ 内存 + PG（施工 ④，R8 裁决落地）——租约过期的 `cancelling` 行落 `cancelled`，不计 attempts；`cmd` 的周期回收同批带上 |
 | 入队前「内核 / 市场可解析」校验（§9.4 fail-closed ①） | ⬜ 未实现（依赖 `EngineRegistry` / `MarketRouter`，本仓不引） |
-| `batch` / `walkforward` / `run_artifacts` / 其余 C 组端点（batch / walkforward / worker / provenance） | ⬜ 未实现（X5b / X0）；jobs 4 端点已落（见上表） |
+| batch / walkforward 的**规划与汇总**（网格展开 / 窗口切分 / 三值计数 / 排名 / 父状态） | ✅ 纯函数已落 `internal/plan`（施工 ⑥，X5b），共享套件同跑两种父；**未落**：`batch_runs` / `walk_forward_reports` 写入、batch/walkforward 4 端点、worker 领取执行 |
+| `run_artifacts` / worker / provenance 端点 | ⬜ 未实现（X0 / R5）；jobs 4 端点已落（见上表） |
 | worker 心跳超时 → `offline` | ✅ 内存 + PG（施工 ⑤，R10）——可选接口 `WorkerReaper.ReapOffline`；`offline` 的 worker 不再被派活（`Claim` / `ClaimByKernel` 同一个 active 门），存活证明（心跳 / 重注册）可复活未 drain 的 worker。**消费方**：`cmd` 的周期回收；worker 进程本身仍未做 |
 
 **故意取舍（施工 ①②③ 累计）**
@@ -376,4 +379,15 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 10. **PG 腿跨测试进程排队**（施工 ③）：`internal/testdb` 用会话级 advisory lock 把两个包的 PG 腿串行化。代价是本地跑全套 PG 腿约 3-4 秒；换来的是不再有「只有 `go test ./...` 才红、单跑永远绿」的假红。
 11. **`offline` 的进入与退出都要有可执行的入口**（施工 ③ 原口径「不在套件里凑」，施工 ⑤ 收口）：施工 ③ 时 port 里没有 draining → offline 的入口，套件拒绝用「直接改库」凑覆盖（凑出来的绿比空白更容易骗人）。施工 ⑤ 用可选接口 `WorkerReaper` 补上了入口，所以那条断言现在走的是真 port；同时定死退出规则——`offline` 是**推断**，未请求过 drain 的可以被心跳 / 重注册拉回 `active`（并刷新心跳），请求过 drain 的不能（运维意图优先）。代价：`Claim` 对 offline 仍报 `ErrWorkerDraining`（冻结面只有一个「不配领新活」的哨兵，不新增错误语义），调用方要看报文里的实际状态。
 
-**自检结论**（施工 ⑤ 后）：语义面与 durable 面都已落地——`JobQueue` / `WorkerRegistry` 各有两个实现（内存 + PG），跑的是**同一套** qtest 用例（每个实现 45 条 = 队列 30 + 注册表 9 + 跨 port 6；`go test -v` 实测计数，施工 ③ 本节写的「37 条」是**误记**——那时跨 port 实际只有 1 条，施工 ⑤ 重数才暴露），PG 腿在真库上绿（R10 之前的部分；R10 的 PG 腿本轮因本机无库**未跑**，如实登记在 `docs/TASKS.md` 施工 ⑤）；`cmd/orchestrationservice` 能在启动时建库并对外提供 jobs 4 端点，端到端跨进程共享队列有实测腿；R8 / R9 / R10 三条已裁事项的代码已同批落在两个实现上。**仍未完成**：X5b（batch / walkforward）、X0（`run_artifacts` 写入 + `/provenance`）、worker 领取执行的装配（本仓没有引擎，故 `ClaimByKernel` 目前没有生产消费方）、鉴权（R5）、以及 `pkg/backtest` 侧的迁移（属 core，见 `docs/TASKS.md` 验收对照）。判据是「队列的 durable 形状已可运行，批量/前向/坐标三面还是空的」。
+**施工 ⑥（X5b：batch / walkforward 的规划与汇总）**
+
+| 面 | 已落口径 | 未落 |
+|---|---|---|
+| batch 网格 | 参数名按字典序、最后一个参数变化最快；展开是**笛卡尔积**，每个点生成完整 RunSpec（`strategy_params` 浅合并，网格值覆盖同名 base 值，其余字段一字不改）；空网格 / 空取值 / 非标量 / 尾随内容 / 超过 100 个任务 → `invalid_params` | 父记录 `batch_runs` 写入、`/api/runs/batch` 端点 |
+| walkforward 窗口 | 交易日必须严格递增；只生成**完整**窗口（train/test 各按交易日数），`step_days` 必须为正；train/test 首尾相接不重叠；`min_train_days` 空 = `train_days/2`（固定窗口下恒成立）；不足一个完整窗口 / 日历违约 → `invalid_params` | 直连 data 服务的 `TradingCalendar` 只读 port（本层只收日历切片）、父记录 `walk_forward_reports` 写入、`/api/runs/walkforward` 端点 |
+| 子 run 派生 | walkforward 每窗两条（train / test），只替换 `start_date` / `end_date`；kernel / fill_timing / seed / strategy_params / strategy_ref 原样保留（共享套件逐字段断言） | 子 run 入队与幂等键生成、R6 的子 run 关系 |
+| 汇总 | 三值分开计数（`completed` / `invalid` / `failed`）+ `pending`；batch 必须传计划总数且与逐条回报数一致（漏报即拒），walkforward 缺段 / 缺窗算 pending；只对 `completed` 且给出有限 score 的子 run 排名（同分按 `run_id` 升序），`invalid` / `failed` 保留但 `rank=0`；walkforward 单段失败 = 整窗失败；父状态：还有未回报 → `running`，任一 failed → `failed`（**不吞**子失败），否则 `completed` | 结果内容解析 / 指标均值（本仓不碰结果内容；score 由执行侧给） |
+
+**R6 仍未裁**：施工 ⑥ **没有**建第六张表、没有给子 run 的 `request_json` 塞父元数据，也没有写 `batch_runs` / `walk_forward_reports` 行——父记录持久化必须等 R6 定下「子 run 关系怎么存」（(a) 第六张表 / (b) 父表存 `child_run_ids`）。因此本轮的产出是**可复用的规划与汇总层**，不是可运行的 batch/wf 端点；`run` schema 五张表的语义一字未改。
+
+**自检结论**（施工 ⑥ 后）：队列的语义面与 durable 面已落地（内存 + PG 同一套 qtest，45 条/实现；R10 的 PG 腿本机无库未跑，如实登记）；`internal/plan` 把 X5b 的**规划与汇总**做成了纯函数，并由 `internal/plansuite` 的 7 条共享用例同时跑在 batch / walkforward 上；`cmd/orchestrationservice` 仍只提供 jobs 4 端点。**仍未完成**：batch/walkforward 的父记录持久化与 4 端点、X0（`run_artifacts` 写入 + `/provenance`）、worker 领取执行的装配（本仓没有引擎，故 `ClaimByKernel` 目前没有生产消费方）、鉴权（R5）、R6 的子 run 关系、以及 `pkg/backtest` 侧的迁移（属 core，见 `docs/TASKS.md` 验收对照）。判据是「队列可运行、批量/前向的算账逻辑可单测，但还不能落库、不能对外提交」。

@@ -1,12 +1,13 @@
 ---
 status: active
-last-verified: 2026-10-23
-verified-by: 施工 ③（PG 已接线，jobs 4 端点的对外行为未变）
+last-verified: 2026-10-24
+verified-by: 施工 ⑥（X5b 规划 / 汇总层，对外端点未变；batch/walkforward 4 端点仍未实现）
 ---
 
 # API Schema — tellurion-orchestration
 
-> **实现状态（2026-10-23，施工 ③）**：`internal/queue` 已落 `JobQueue` / `WorkerRegistry` 两个 **Go port** + 内存实现 + `run` schema DDL **并已接 PG**（X5a/X5c + 施工 ③）：PG 实现在 `internal/pgstore`，与内存实现跑**同一套**语义用例（`internal/qtest`，29+6+2 条），启动迁移在 `cmd/orchestrationservice`。`internal/httpapi` 已落**任务 4 端点**（`POST`/`GET list`/`GET {id}`/`DELETE {id}`，§1「任务」表）——端点行为按 §2 的错误码与幂等语义实现，哨兵 → wire code 的映射在 `internal/httpapi/api.go` 的 `classify`。**仍未实现**：batch / walkforward / worker / provenance 端点（X5b / X0）；鉴权（R5 未裁，`unauthenticated` / `forbidden` 暂不产生）。
+> **实现状态（2026-10-24，施工 ③/⑥）**：`internal/queue` 已落 `JobQueue` / `WorkerRegistry` 两个 **Go port** + 内存实现 + `run` schema DDL **并已接 PG**（X5a/X5c + 施工 ③）：PG 实现在 `internal/pgstore`，与内存实现跑**同一套**语义用例（`internal/qtest`，每个实现 45 条 = 队列 30 + 注册表 9 + 跨 port 6），启动迁移在 `cmd/orchestrationservice`。`internal/httpapi` 已落**任务 4 端点**（`POST`/`GET list`/`GET {id}`/`DELETE {id}`，§1「任务」表）——端点行为按 §2 的错误码与幂等语义实现，哨兵 → wire code 的映射在 `internal/httpapi/api.go` 的 `classify`。**仍未实现**：batch / walkforward / worker / provenance 端点（X5b / X0）；鉴权（R5 未裁，`unauthenticated` / `forbidden` 暂不产生）。
+> **X5b 规划 / 汇总层（2026-10-24 施工 ⑥）**：`internal/plan` 已能展开网格、切交易日窗口、汇总三值计数与父状态，但**没有新增或改变任何端点**——下面 batch / walkforward 的 wire 形状仍是**目标契约**。父记录写入（`batch_runs` / `walk_forward_reports`）依赖 R6 的子 run 关系裁决，未裁前不落库。
 > 本文件是**目标契约**，不是现状说明书；开工顺序见 `docs/TASKS.md` 的「施工序」。
 > **请求 / 响应形状、状态机、幂等键与 `run` schema 的目标键**见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9（M8 接口对表）。本文件只钉**对外行为**（方法、路径、错误码、幂等），不重复字段表。
 
