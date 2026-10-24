@@ -70,3 +70,21 @@ type WorkerRegistry interface {
 	Drain(ctx context.Context, workerID string) error
 	List(ctx context.Context) ([]WorkerRecord, error)
 }
+
+// WorkerReaper 是 WorkerRegistry 的**可选能力**（docs/ARCHITECTURE.md §9.7 R10：
+// 加可选能力走新接口 = MINOR，上面 4 个方法一个字没动）。
+//
+// 它补的是「心跳停了，注册表里却仍是 active」这条缝：领取门只看 `status`，没有
+// 这条迁移，一个崩溃的 worker 会被永远当成可派活的对象。判定只用心跳时间——
+// `last_heartbeat_at <= now-timeout`（含等于，与 ReapExpired 的租约判据同口径）
+// ⇒ `offline`；不删行（审计要留），已 offline 的不重复计数。`draining` 同样在
+// 回收范围内：滚动升级的收尾就是「手上的活跑完 → 心跳停 → offline」
+// （docs/dataflow.md §2 第 8 步）。
+//
+// timeout <= 0 → ErrInvalidInput（阈值属部署配置，本包不给默认值）。
+// now 为零值时取实现的时钟，与 Register / ReapExpired 同口径。
+//
+// 装配方用类型断言探测：`if rr, ok := reg.(queue.WorkerReaper); ok { ... }`。
+type WorkerReaper interface {
+	ReapOffline(ctx context.Context, now time.Time, timeout time.Duration) (int, error)
+}

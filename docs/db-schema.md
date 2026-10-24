@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-24
-verified-by: 施工 ④（schema 无变更；`worker_registry.kernels` 的消费点已落）
+verified-by: 施工 ⑤（schema 无变更；`worker_registry.status` 的心跳超时迁移已落两个实现，`offline` 不再只是枚举值）
 ---
 
 # DB Schema — tellurion-orchestration
@@ -22,7 +22,7 @@ verified-by: 施工 ④（schema 无变更；`worker_registry.kernels` 的消费
 | `run.walk_forward_reports` | 前向验证报告（`wf_id` + 逐窗 run 指针） | DDL 已落；功能未实现（X5b） |
 | `run.batch_runs` | 批量扫描批次 + 评分汇总 | DDL 已落；功能未实现（X5b） |
 | `run.run_artifacts` | 每次 run 的三 hash（`strategy_ref` / `dataset_snapshot_hash` / `risk_rules_hash`）+ artifact 指针 | DDL 已落（FK 生效已实测）；写入路径与读端点未实现（X0）；🔒 冻结面，变更须走评审 |
-| `run.worker_registry` | worker 注册与心跳（active / draining / offline） | DDL 已落并**已接 PG**（`internal/pgstore` 的 `WorkerRegistry` 实现） |
+| `run.worker_registry` | worker 注册与心跳（active / draining / offline） | DDL 已落并**已接 PG**（`internal/pgstore` 的 `WorkerRegistry` 实现）；心跳超时 → `offline` 由可选接口 `WorkerReaper.ReapOffline` 写入（施工 ⑤） |
 | `quant.strategy_state`（不属本仓） | 运行状态检查点（断点续跑） | 归 strategy-runtime 模块 · core 写（2026-10-21 裁决，指 `tellurion:docs/design/system-spec-review-2026-10-21.md` H5） |
 
 > 🔒 **冻结标注**：`run_artifacts` 的三 hash 与 artifact 指针属 **ResultSpec 冻结 schema 面**（`tellurion:docs/SPEC.md` K9「ResultSpec 冻结」；内容寻址三兄弟见 `tellurion-contracts:docs/api-schema.md` §3）——增列 / 改口径 / 改 hash 算法都算改冻结面，**须走评审**（`tellurion:docs/TASKS.md`「维护本文件」的冻结 schema 变更评审硬规则），不得顺手改。
@@ -82,7 +82,7 @@ verified-by: 施工 ④（schema 无变更；`worker_registry.kernels` 的消费
 | `run.run_artifacts` | `run_id` | 三 hash + `artifact_uri` 是冻结最小集；**无 `status`**（QT-63 ④）；`/provenance` 与本表 ⋈ `backtest_jobs` 取结论 |
 | `run.batch_runs` | `batch_id`；`UNIQUE(idempotency_key)` | 网格 + base RunSpec + 三值计数 + 排序汇总；不复制子结果 |
 | `run.walk_forward_reports` | `wf_id`；`UNIQUE(idempotency_key)` | 窗口配置 + 逐窗 run 指针 + 三值计数；部分失败显式计数 |
-| `run.worker_registry` | `worker_id` | 能力（`kernels`，施工 ④ 起由可选接口 `KernelAwareJobQueue.ClaimByKernel` 消费；空数组 = 不过滤，不是「什么都不能干」）/ 心跳 / active → draining → offline；超时不删行 |
+| `run.worker_registry` | `worker_id` | 能力（`kernels`，施工 ④ 起由可选接口 `KernelAwareJobQueue.ClaimByKernel` 消费；空数组 = 不过滤，不是「什么都不能干」）/ 心跳 / active → draining → offline（施工 ⑤：`last_heartbeat_at <= now-timeout` 由 `ReapOffline` 推 offline，含 draining；未请求 drain 的可用心跳 / 重注册恢复 active）；超时不删行 |
 
 **迁移路径**（与 QT-63 ③-① 一致）：`backtest_jobs` / `walk_forward_reports` 双写 → 对拍 → 切读 → 停写；`quant.run_provenance` 由 `run.run_artifacts` 双写/对拍/切读/停写后取代。**子 run 关系**（batch / wf 的 task / window → `backtest_jobs` 行）待裁，见 `ARCHITECTURE.md` §9.7 R6，未定前不建第六张表。
 

@@ -302,6 +302,60 @@ func PairCases() []PairCase {
 				}
 			},
 		},
+		{
+			Name: "OfflineWorkerIsNotDispatchedUntilProofOfLife",
+			Run: func(t *testing.T, p Pair) {
+				// R10 的验收：心跳超时 → offline 之后，**两个领取入口**都不再派活；
+				// 同一个活由在线 worker 领走（离线只是摘掉这一台，不是停队列）；
+				// 心跳复活后又能领。
+				ctx := ctxT(t)
+				rr := reaperOf(t, p.Workers)
+				kq := kernelAware(t, p.Jobs)
+				const timeout = time.Minute
+				stale := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Hour)
+
+				for _, id := range []string{"w-go", "w-backup"} {
+					if err := p.Workers.Register(ctx, queue.WorkerRecord{WorkerID: id, Kernels: []string{"go"}}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				job := enqueue(t, p.Jobs, "k-offline", `{"kernel":"go"}`, at(1))
+				// 只让 w-go 的心跳过期：backup 刚注册，心跳是新的。
+				if err := p.Workers.Heartbeat(ctx, "w-go", stale); err != nil {
+					t.Fatal(err)
+				}
+				if n, err := rr.ReapOffline(ctx, time.Now().UTC(), timeout); err != nil || n != 1 {
+					t.Fatalf("reap = %d/%v, want 1/nil", n, err)
+				}
+				if got := mustWorker(t, p.Workers, "w-go"); got.Status != queue.WorkerOffline {
+					t.Fatalf("w-go = %q, want offline", got.Status)
+				}
+
+				// 两个入口走同一个 active 门：offline 与 draining 共用 ErrWorkerDraining
+				// （冻结方法集只有这一个「不配领新活」的哨兵），且都不碰行。
+				if _, err := kq.ClaimByKernel(ctx, "w-go", time.Minute); !errors.Is(err, queue.ErrWorkerDraining) {
+					t.Fatalf("ClaimByKernel by an offline worker = %v, want ErrWorkerDraining", err)
+				}
+				if _, err := p.Jobs.Claim(ctx, "w-go", time.Minute); !errors.Is(err, queue.ErrWorkerDraining) {
+					t.Fatalf("Claim by an offline worker = %v, want ErrWorkerDraining", err)
+				}
+				if left := mustGet(t, p.Jobs, job.ID); left.Status != queue.RunPending || left.WorkerID != "" {
+					t.Fatalf("the offline worker touched the row: %+v", left)
+				}
+				if got := mustClaimKernel(t, kq, "w-backup"); got == nil || got.ID != job.ID {
+					t.Fatalf("backup claim = %+v, want %s", got, job.ID)
+				}
+
+				// 心跳复活：存活证明推翻「离线」推断，重新可派活。
+				if err := p.Workers.Heartbeat(ctx, "w-go", time.Time{}); err != nil {
+					t.Fatalf("heartbeat after timeout: %v", err)
+				}
+				again := enqueue(t, p.Jobs, "k-revived", `{"kernel":"go"}`, at(2))
+				if got := mustClaimKernel(t, kq, "w-go"); got == nil || got.ID != again.ID {
+					t.Fatalf("claim after revival = %+v, want %s", got, again.ID)
+				}
+			},
+		},
 	}
 }
 
@@ -365,6 +419,17 @@ func kernelAware(t *testing.T, q queue.JobQueue) queue.KernelAwareJobQueue {
 		t.Fatalf("%T does not implement queue.KernelAwareJobQueue (§9.7 R9: Kernels 要真的被消费)", q)
 	}
 	return kq
+}
+
+// reaperOf 探测可选能力接口（R10 的落点）：心跳超时 → offline 必须两个实现都能做，
+// 缺了就是能力声明没落地——不静默退回「永不 offline」。
+func reaperOf(t *testing.T, r queue.WorkerRegistry) queue.WorkerReaper {
+	t.Helper()
+	rr, ok := r.(queue.WorkerReaper)
+	if !ok {
+		t.Fatalf("%T does not implement queue.WorkerReaper (§9.7 R10: 心跳超时 → offline 要真的可执行)", r)
+	}
+	return rr
 }
 
 // mustClaimKernel 走可选接口领取一条；出错即 fatal。
@@ -1342,8 +1407,8 @@ func RegistryCases() []RegistryCase {
 		}},
 
 		{"ReRegisterKeepsStatusAndStartedAt", func(t *testing.T, r queue.WorkerRegistry) {
-			// 重复注册 = 覆盖能力/心跳，**不改 status**：已 drain 的 worker 不能靠
-			// 重注册洗回 active（否则 drain 可被绕过）；started_at 也不能被洗成
+			// 重复注册 = 覆盖能力/心跳，**不把 draining 改回 active**：已 drain 的
+			// worker 不能靠重注册洗回 active（否则 drain 可被绕过）；started_at 也不能被洗成
 			// 重注册时刻（2026-10-23 施工 ① 自审修掉的缺陷）。
 			ctx := ctxT(t)
 			if err := r.Register(ctx, queue.WorkerRecord{WorkerID: "w1", Kernels: []string{"go"}}); err != nil {
@@ -1434,10 +1499,9 @@ func RegistryCases() []RegistryCase {
 			if err := r.Heartbeat(ctx, "w1", time.Now().UTC()); err != nil {
 				t.Fatalf("heartbeat on draining = %v, want nil", err)
 			}
-			// ⚠️ 未覆盖：`offline` 再 drain → ErrInvalidTransition 这条分支今天
-			// **无法从 port 到达**——§9.2 的冻结方法集没有把 draining 推到 offline
-			// 的入口（心跳超时→offline 属 §9.8 的未落项，补它要新接口 = MINOR）。
-			// 不在套件里用「直接改库」把它凑成绿：凑出来的覆盖比空白更容易骗人。
+			// `offline` 再 drain → ErrInvalidTransition 这条分支施工 ③ 时从 port
+			// 不可达（没有 draining → offline 的入口）；R10 的心跳回收补上了入口，
+			// 断言见 ReapOfflineMarksStaleWorkersOffline 末尾。
 		}},
 
 		{"ListIsEmptyNotNilAndSorted", func(t *testing.T, r queue.WorkerRegistry) {
@@ -1460,6 +1524,159 @@ func RegistryCases() []RegistryCase {
 			}
 			if len(list) != 3 || list[0].WorkerID != "w1" || list[1].WorkerID != "w2" || list[2].WorkerID != "w3" {
 				t.Fatalf("list order = %v", list)
+			}
+		}},
+
+		{"ReapOfflineMarksStaleWorkersOffline", func(t *testing.T, r queue.WorkerRegistry) {
+			// R10：心跳超时 → offline。判据只用心跳时间（`<= now-timeout`，含等于），
+			// 不删行、不重复计数；`draining` 同样在回收范围内（滚动升级的收尾）。
+			ctx := ctxT(t)
+			rr := reaperOf(t, r)
+			const timeout = time.Minute
+			// 截到微秒：PG 的 timestamptz 只到微秒，不截会在内存侧绿、PG 侧假红。
+			stale := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Hour)
+
+			if err := r.Register(ctx, queue.WorkerRecord{WorkerID: "w-stale"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Heartbeat(ctx, "w-stale", stale); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Register(ctx, queue.WorkerRecord{WorkerID: "w-drain"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Drain(ctx, "w-drain"); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Heartbeat(ctx, "w-drain", stale); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Register(ctx, queue.WorkerRecord{WorkerID: "w-fresh"}); err != nil {
+				t.Fatal(err)
+			}
+
+			// 差一秒到阈值：一条都不动（边界是 `<=`，不是 `<`）。
+			if n, err := rr.ReapOffline(ctx, stale.Add(timeout-time.Second), timeout); err != nil || n != 0 {
+				t.Fatalf("reap before the cutoff = %d/%v, want 0/nil", n, err)
+			}
+			if got := mustWorker(t, r, "w-stale"); got.Status != queue.WorkerActive {
+				t.Fatalf("w-stale = %q before the cutoff", got.Status)
+			}
+
+			// 恰好等于阈值：两条过期，fresh 不动。
+			if n, err := rr.ReapOffline(ctx, stale.Add(timeout), timeout); err != nil || n != 2 {
+				t.Fatalf("reap at the cutoff = %d/%v, want 2/nil", n, err)
+			}
+			if got := mustWorker(t, r, "w-stale"); got.Status != queue.WorkerOffline {
+				t.Fatalf("stale active worker = %q, want offline", got.Status)
+			}
+			if got := mustWorker(t, r, "w-drain"); got.Status != queue.WorkerOffline {
+				t.Fatalf("stale draining worker = %q, want offline（滚动升级的收尾）", got.Status)
+			}
+			if got := mustWorker(t, r, "w-fresh"); got.Status != queue.WorkerActive {
+				t.Fatalf("fresh worker = %q, want active", got.Status)
+			}
+
+			// 幂等：已 offline 的不重复计数，也不动 drain_requested_at。
+			before := mustWorker(t, r, "w-drain")
+			if n, err := rr.ReapOffline(ctx, time.Now().UTC(), timeout); err != nil || n != 0 {
+				t.Fatalf("second reap = %d/%v, want 0/nil", n, err)
+			}
+			if after := mustWorker(t, r, "w-drain"); !after.DrainRequestedAt.Equal(before.DrainRequestedAt) {
+				t.Fatalf("reaping moved drain_requested_at: %s -> %s", before.DrainRequestedAt, after.DrainRequestedAt)
+			}
+
+			// offline 再 drain → ErrInvalidTransition：施工 ③ 时这条分支从 port
+			// 不可达，心跳回收给了它入口（§9.8 取舍 11 的旧口径同时作废）。
+			if err := r.Drain(ctx, "w-stale"); !errors.Is(err, queue.ErrInvalidTransition) {
+				t.Fatalf("drain on an offline worker = %v, want ErrInvalidTransition", err)
+			}
+		}},
+
+		{"ReapOfflineRejectsNonPositiveTimeout", func(t *testing.T, r queue.WorkerRegistry) {
+			// 阈值属部署配置（R7 同口径）：本包不给默认值，0 不是「用默认」而是
+			// 「没配」——拿 0 当兜底会让所有 worker 在一轮内全变 offline。
+			rr := reaperOf(t, r)
+			for _, timeout := range []time.Duration{0, -time.Second} {
+				if n, err := rr.ReapOffline(ctxT(t), time.Now().UTC(), timeout); !errors.Is(err, queue.ErrInvalidInput) || n != 0 {
+					t.Fatalf("ReapOffline(timeout=%s) = %d/%v, want 0/ErrInvalidInput", timeout, n, err)
+				}
+			}
+		}},
+
+		{"OfflineWorkerRevivesOnProofOfLifeUnlessDrained", func(t *testing.T, r queue.WorkerRegistry) {
+			// offline 是「心跳超时」的**推断**，不是运维意图：心跳 / 重注册都是存活
+			// 证明，可以推翻它；请求过 drain 的不能（运维意图优先，否则 drain 可被
+			// 一次重注册绕过）。复活必须同时刷新心跳——继承过期心跳会让下一轮回收
+			// 立刻再判 offline，恢复形同虚设。
+			ctx := ctxT(t)
+			rr := reaperOf(t, r)
+			const timeout = time.Minute
+			stale := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Hour)
+			now := time.Now().UTC()
+
+			mkOffline := func(id string, drain bool) {
+				t.Helper()
+				if err := r.Register(ctx, queue.WorkerRecord{WorkerID: id}); err != nil {
+					t.Fatal(err)
+				}
+				if drain {
+					if err := r.Drain(ctx, id); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := r.Heartbeat(ctx, id, stale); err != nil {
+					t.Fatal(err)
+				}
+				if n, err := rr.ReapOffline(ctx, now, timeout); err != nil || n != 1 {
+					t.Fatalf("reap %s = %d/%v, want 1/nil", id, n, err)
+				}
+				if got := mustWorker(t, r, id); got.Status != queue.WorkerOffline {
+					t.Fatalf("%s = %q, want offline", id, got.Status)
+				}
+			}
+
+			// 存活证明之一：心跳。
+			mkOffline("w-alive", false)
+			if err := r.Heartbeat(ctx, "w-alive", time.Time{}); err != nil {
+				t.Fatalf("heartbeat after timeout: %v", err)
+			}
+			if got := mustWorker(t, r, "w-alive"); got.Status != queue.WorkerActive {
+				t.Fatalf("heartbeat must revive an inferred offline, got %q", got.Status)
+			}
+			if n, err := rr.ReapOffline(ctx, time.Now().UTC(), timeout); err != nil || n != 0 {
+				t.Fatalf("reap right after revival = %d/%v, want 0/nil", n, err)
+			}
+
+			// 存活证明之二：重注册（进程崩溃重启的唯一恢复路径）。
+			mkOffline("w-restart", false)
+			if err := r.Register(ctx, queue.WorkerRecord{WorkerID: "w-restart"}); err != nil {
+				t.Fatalf("re-register: %v", err)
+			}
+			revived := mustWorker(t, r, "w-restart")
+			if revived.Status != queue.WorkerActive {
+				t.Fatalf("re-register must revive an inferred offline, got %q", revived.Status)
+			}
+			if time.Since(revived.LastHeartbeatAt) > time.Minute {
+				t.Fatalf("revival kept the stale heartbeat: %s", revived.LastHeartbeatAt)
+			}
+			if n, err := rr.ReapOffline(ctx, time.Now().UTC(), timeout); err != nil || n != 0 {
+				t.Fatalf("reap after re-register = %d/%v, want 0/nil", n, err)
+			}
+
+			// 已请求 drain：两种存活证明都不得洗回 active。
+			mkOffline("w-drained", true)
+			if err := r.Heartbeat(ctx, "w-drained", time.Time{}); err != nil {
+				t.Fatalf("heartbeat on drained-offline: %v", err)
+			}
+			if got := mustWorker(t, r, "w-drained"); got.Status != queue.WorkerOffline {
+				t.Fatalf("heartbeat washed the drain away: %q", got.Status)
+			}
+			if err := r.Register(ctx, queue.WorkerRecord{WorkerID: "w-drained"}); err != nil {
+				t.Fatalf("re-register drained-offline: %v", err)
+			}
+			if got := mustWorker(t, r, "w-drained"); got.Status != queue.WorkerOffline {
+				t.Fatalf("re-register washed the drain away: %q", got.Status)
 			}
 		}},
 	}

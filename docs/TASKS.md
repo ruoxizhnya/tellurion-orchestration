@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-24
-verified-by: QT-44 施工 ①②③④（④ = R8 / R9 裁决落地，两个实现同批）
+verified-by: QT-44 施工 ①②③④⑤（④ = R8 / R9 裁决落地；⑤ = R10 心跳超时 → offline，两个实现同批）
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -57,6 +57,16 @@ verified-by: QT-44 施工 ①②③④（④ = R8 / R9 裁决落地，两个实�
 > 验收对照（本单 ⑤ 三条判据，施工 ④ 后）：「`pkg/backtest` 零命中」与「同一 batch 新旧一致」**仍未达成**（属 X5b/迁移腿，且第一条不可能由本仓产出，见下）；「provenance 端点返回三 hash」仍未达成（属 X0）。整体仍 **🔶**。
 
 
+> **施工记录（2026-10-24，施工 ⑤：工单 G3「QT-44 的 X5c 心跳超时」）**：`WorkerStatus` 里的 `offline` 之前只是枚举值——冻结的 4 方法集没有入口能写它，心跳一停注册表仍显示 `active`。本轮按 R9 的同一先例（§9.6「可选能力走新接口 = MINOR」）补 **R10**：
+> **接口与实现**：`queue.WorkerReaper.ReapOffline(ctx, now, timeout)`（`internal/queue/ports.go`），冻结的 `WorkerRegistry` 4 方法一字未动。判据只有心跳时间：`last_heartbeat_at <= now-timeout`（含等于，与 `ReapExpired` 的租约判据同口径）→ `offline`；`draining` 一并回收（滚动升级的收尾就是「跑完手上的 → 心跳停 → offline」）；不删行、已 offline 不重复计数、NULL 心跳不参与判定（没有心跳时间就无从判断存活，不猜）；`timeout <= 0` → `ErrInvalidInput`（阈值属部署，不给默认值）。内存侧在 `MemoryRegistry.ReapOffline`，PG 侧是 `reapOfflineSQL` 单条 UPDATE（单语句原子；与心跳并发时由行锁裁决，心跳先提交则 WHERE 重判、不会误杀）。
+> **进入与退出都定死**：`offline` 是**推断**，不是运维意图——未请求过 drain 的 worker 可以被心跳或重注册拉回 `active`（两种都是存活证明）；请求过 drain 的不能（否则 drain 可被一次重注册绕过）。复活时**必须刷新心跳**（重注册走复活分支时不再继承过期心跳），否则下一轮回收立刻再判 offline，恢复形同虚设。不这么做的话，worker id 会被一次瞬时超时永久作废（崩溃重启仍是同一个 id，没有别的恢复入口）。**代价**：`Claim` / `ClaimByKernel` 对 offline 仍报 `ErrWorkerDraining`——冻结面只有一个「不配领新活」的哨兵，本单不新增错误语义（报文里带实际状态）。
+> **接线**：`cmd/orchestrationservice` 的周期任务现在同一轮做两件回收（`-reap-interval` 默认 30s）：租约 `ReapExpired` + 心跳 `ReapOffline`（`-heartbeat-timeout` 默认 90s，0 = 关闭）。开启时装配期做能力断言并 fail-closed——不提供 `WorkerReaper` 的注册表不允许带着「以为会回收」启动。
+> **套件**：每个实现 **45 条**（队列 30 + 注册表 9 + 跨 port 6；新增 `ReapOfflineMarksStaleWorkersOffline` / `ReapOfflineRejectsNonPositiveTimeout` / `OfflineWorkerRevivesOnProofOfLifeUnlessDrained` / `OfflineWorkerIsNotDispatchedUntilProofOfLife`），内存与 PG 跑同一批。新用例同时把施工 ③ 登记为「从 port 不可达」的 `offline` 再 drain → `ErrInvalidTransition` 分支补上了真入口。
+> **破坏验证（一条腿，改坏应红 → 逐字节还原 → 绿）**：Memory 的 `cutoff := at.UTC().Add(-timeout)` 改成 `Add(timeout)`（阈值方向反了，语句照样合法）→ 三条红：`Memory/ReapOfflineMarksStaleWorkersOffline`（`reap before the cutoff = 2/<nil>, want 0/nil`）、`Memory/OfflineWorkerRevivesOnProofOfLifeUnlessDrained`（`reap right after revival = 1/<nil>`）、`Memory/OfflineWorkerIsNotDispatchedUntilProofOfLife`（`reap = 2/<nil>, want 1/nil`）。还原后 `internal/queue/worker.go` 的 sha256 与改前**逐字节相同**（`5456e309…`），整包复绿。PG 侧同一条腿**本轮未跑**：本机没有可用 PG（5432 未监听、Docker daemon 未启动），PG 腿全部 `skip`——这是如实登记的缺口，不是通过。
+> **门禁**：`gofmt -l .` 空；`go build ./...` / `go vet ./...` / `go test ./... -count=1` 全绿（无 DSN，PG 腿 skip，输出见提交记录）。本机 `-race` 仍跑不了（`CGO_ENABLED=0`、无 C 编译器）。
+> **验收对照（G3）**：① 内存与 PG **同一套**新用例——代码同批落、套件同源；本机只跑过内存腿，PG 腿待有库环境/CI 补跑。② `offline` 后 `ClaimByKernel` 跳过该 worker——`OfflineWorkerIsNotDispatchedUntilProofOfLife` 在内存腿实测绿（两个领取入口都拒绝，行保持 `pending`，由在线 worker 领走）。③ `drain` 行为不回归——既有 `DrainingWorkerCannotClaimButUnregisteredCan` / `DrainStateMachine` / `ReRegisterKeepsStatusAndStartedAt` 全绿，且请求过 drain 的 offline worker 不被心跳/重注册洗回 active。
+
+
 >
 > **⚠️ 工单 G7 的两条验收前提被源码证伪（2026-10-23 实测，如实登记，不当已完成）**：
 > 1. **「`pkg/backtest` 里 `job|batch|walkforward` 零命中」不是本仓能产出的判据**：core `pkg/backtest` 实测 **1032 处命中 / 39 个文件**（`job/job.go` 207、`batch/batch.go` 67、`walkforward/walkforward.go` 34、`aliases.go` 39…）。达成它要的是 core 侧 O3（`tellurion:docs/design/qt-decoupling/orchestration-service-design.md` §7「编排层整体移出 `pkg/backtest`」），而 R1 与本仓 `db-schema.md` §5 冻结的路径是「双写 → 对拍 → 切读 → 停写」——旧路径在 O0 切换前**必须继续服务**。本仓能做的是把 durable 侧与 port 做出来，不能单方面让别人的包变空。
@@ -90,7 +100,7 @@ verified-by: QT-44 施工 ①②③④（④ = R8 / R9 裁决落地，两个实�
 |---|---|---|---|
 | X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① `internal/queue` 语义；② jobs 4 端点 HTTP 面；③ **DDL 已接 PG + 启动迁移 + 双实现共享用例**；④ R8 回收出口 + R9 `ClaimByKernel` 落两个实现）| `QT-44` | 本仓立项 |
 | X5b | batch + walkforward（窗口切分与汇总） | `QT-44` | X5a |
-| X5c | worker 注册 / 心跳 / `drain` 🔶（施工 ① 内存；③ PG 已落；心跳超时→`offline` 仍未落） | `QT-44` | X5a |
+| X5c | worker 注册 / 心跳 / `drain` / 心跳超时 🔶（施工 ① 内存；③ PG 已落；⑤ 心跳超时→`offline` 两个实现同批 + `cmd` 接线；worker 进程本身未做） | `QT-44` | X5a |
 | X0 | `run_artifacts` 三 hash 留痕 + `/provenance` | `QT-03` | X5a |
 
 ## 二、跨仓指针（不在本仓，勿双写）

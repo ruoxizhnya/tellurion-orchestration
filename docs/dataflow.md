@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-24
-verified-by: 施工 ④（PG 装配 / 启动迁移 / 周期租约回收已落；R8 的 `cancelling` 出口与 R9 的 `ClaimByKernel` 已落两个实现）
+verified-by: 施工 ⑤（R10 心跳超时 → `offline` 已落两个实现，`cmd` 周期回收同批调用；链路与不变量 4 同步）
 ---
 
 # Dataflow — tellurion-orchestration
@@ -47,7 +47,7 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 
 6. `DELETE /api/runs/jobs/{id}`：`pending` → 直接 `cancelled`（保留行）；`running` → `cancelling` + `cancel_requested=true`；worker 看到后中止、`AckCancel` → `cancelled`。跨进程取消靠 DB，不靠内存 map。
 7. `ReapExpired`（由 `cmd` 的周期任务按 `-reap-interval` 调用）两类迁移：**① `running`** 租约过期 → `pending` 且 `attempts+1`；超过 `max_attempts` → `failed`（`attempts_exhausted`）。被回收的 worker 即使后来跑完，也因 `ErrLeaseLost` 写不进终态（fencing，PG 与内存两侧同形，实测腿 `ExpiredLeaseFencesTheOldOwner`）。**② `cancelling`**（施工 ④，R8 裁决落地）租约过期 → `cancelled`，**不**计 attempts——owner 消失后 `AckCancel` 永远等不到，这行的唯一出口就是这里；`worker_id` 保留作审计。两侧同跑的钉子 `ReapLandsOrphanedCancellingRow`。
-8. 滚动升级：`POST /api/runs/workers/{id}/drain` → `active → draining` → 不再领新活 → 跑完手上的 → `offline`。
+8. 滚动升级：`POST /api/runs/workers/{id}/drain` → `active → draining` → 不再领新活 → 跑完手上的 → 心跳停 → **心跳超时 → `offline`**（施工 ⑤，`WorkerReaper.ReapOffline`，由 `cmd` 的周期任务与租约回收同轮调用；`draining` 也在回收范围内）。`offline` 是**推断**而非运维意图：未请求过 drain 的 worker 可被心跳 / 重注册拉回 `active`（重注册同时刷新心跳）；请求过 drain 的不复活。`offline` 之后 `Claim` / `ClaimByKernel` 都不再派活（同一个 active 门）。
 
 **批量 / 前向**
 
@@ -60,7 +60,7 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 |---|---|---|
 | 队列满 | 提交失败 | 429 + `queue_full` + 退避（不丢任务） |
 | 幂等键冲突 | 同键不同请求 | 409 `idempotency_conflict`，**不复用**旧 job |
-| worker 崩溃 / 心跳停 | 任务卡 `running` | 租约过期 → `ReapExpired` 回 `pending`；超次 → `failed` |
+| worker 崩溃 / 心跳停 | 任务卡 `running`；worker 仍显示在线 | 租约过期 → `ReapExpired` 回 `pending`；超次 → `failed`。worker 本身由心跳超时 → `offline`（`ReapOffline`），不再被派新活 |
 | 取消跨进程 | 内存 cancel 打不到别人 | `cancel_requested` + `cancelling`，worker 主动确认 |
 | 租约丢失后 worker 复活 | 两个 worker 抢写终态 | `ErrLeaseLost` fencing，旧 owner 写不进 |
 | 三 hash 缺失（入队时） | — | **不是入队门槛**：入队只校验引用可解析（三 hash 是 run 产物） |
@@ -74,7 +74,7 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 1. 每个 job 有且仅有一个终态（`completed` / `failed` / `cancelled`）；进入终态后不可再迁移。
 2. 幂等键相同 + `request_hash` 相同 → 同一个 `job_id`；同键不同 hash → 409，绝不复用。
 3. 任何 `result_status` 为 `completed` / `invalid` 的 job（队列 `status=completed`）都能通过 `/provenance` 取到三 hash；`failed` / `cancelled` 允许无 provenance（`failed` 若已跑过则可有）。
-4. `drain` 后该 worker 不再接新任务；在途任务跑完（或租约到期被回收）才 `offline`。
+4. `drain` 后该 worker 不再接新任务；在途任务跑完（或租约到期被回收）才 `offline`。`offline` 同样不接新任务；未请求过 drain 的 `offline` 可被存活证明（心跳 / 重注册）恢复 `active`，请求过 drain 的不行。
 5. `result_status` 只允许 K9 三值；**不存在第四值**；`invalid` 的 `error` 为空、`invalid_reasons` 在结果里。
 6. 同一 job 的 `running` 租约在任一时刻只有一个有效 owner；过期 owner 的写入被拒。
 7. `run` schema 里没有结果内容（只有指针 + 三 hash）；batch / wf 汇总不复制子结果明细。

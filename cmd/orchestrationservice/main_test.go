@@ -36,6 +36,66 @@ func TestResolveDSN(t *testing.T) {
 	}
 }
 
+// TestReapOnceMarksStaleWorkersOffline 钉住周期任务的**接线**：光有
+// WorkerReaper 接口而 cmd 不调它，运行中的服务仍不会把死掉的 worker 摘出去。
+// 用内存实现跑，不需要库。
+func TestReapOnceMarksStaleWorkersOffline(t *testing.T) {
+	ctx := context.Background()
+	reg := queue.NewMemoryRegistry()
+	jobs := queue.NewMemory(queue.MemoryOptions{Workers: reg})
+
+	if err := reg.Register(ctx, queue.WorkerRecord{WorkerID: "w-stale"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(ctx, queue.WorkerRecord{WorkerID: "w-fresh"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Heartbeat(ctx, "w-stale", time.Now().UTC().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	reapOnce(ctx, jobs, reg, time.Minute, time.Now().UTC())
+
+	list, err := reg.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := make(map[string]queue.WorkerStatus, len(list))
+	for _, w := range list {
+		status[w.WorkerID] = w.Status
+	}
+	if status["w-stale"] != queue.WorkerOffline {
+		t.Fatalf("w-stale = %q, want offline（周期任务没接上心跳回收）", status["w-stale"])
+	}
+	if status["w-fresh"] != queue.WorkerActive {
+		t.Fatalf("w-fresh = %q, want active", status["w-fresh"])
+	}
+
+	// 关闭阈值 = 不做心跳回收（部署显式关掉时不偷偷按 0 处理成全离线）。
+	if err := reg.Heartbeat(ctx, "w-fresh", time.Now().UTC().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	reapOnce(ctx, jobs, reg, 0, time.Now().UTC())
+	if got := mustRegistryWorker(t, reg, "w-fresh"); got.Status != queue.WorkerActive {
+		t.Fatalf("heartbeat timeout 0 must disable reaping, got %q", got.Status)
+	}
+}
+
+func mustRegistryWorker(t *testing.T, reg queue.WorkerRegistry, id string) queue.WorkerRecord {
+	t.Helper()
+	list, err := reg.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range list {
+		if w.WorkerID == id {
+			return w
+		}
+	}
+	t.Fatalf("worker %s not found", id)
+	return queue.WorkerRecord{}
+}
+
 func TestDepsFieldsAreInterfaces(t *testing.T) {
 	// 装配点声明成接口才有「换实现不改装配代码」的效果；
 	// 写成 *pgstore.Queue 会让这条腿静默失效（core 的 QT-16 实测教训）。

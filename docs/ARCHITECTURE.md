@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-24
-verified-by: 施工 ④（R8 的 cancelling 回收出口 + R9 的 ClaimByKernel 已落两个实现；§9.2/§9.3/§9.7/§9.8 同步）
+verified-by: 施工 ⑤（R10 心跳超时 → offline 已落两个实现；§8/§9.2/§9.7/§9.8 同步）
 ---
 
 # 架构 — tellurion-orchestration
@@ -69,9 +69,9 @@ tellurion-orchestration ──► core 引擎（派活）
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| X5a | job 队列 + 状态机 + 幂等 | 🔶 语义定形（内存实现 + 单测）+ jobs 4 端点 HTTP 面（施工 ②）；PG 实现未落，见 §9.8 |
+| X5a | job 队列 + 状态机 + 幂等 | ✅ 内存 + PG 两个实现 + jobs 4 端点（施工 ②③④）；R8/R9 已落，见 §9.8 |
 | X5b | batch + walkforward | ⬜ |
-| X5c | worker 注册 / drain | 🔶 注册 / 心跳 / drain 已落（内存）；心跳超时 → `offline` 的口径未定，见 §9.8 |
+| X5c | worker 注册 / 心跳 / drain / 心跳超时 | 🔶 注册 / 心跳 / drain / 心跳超时 → `offline` 已落（内存 + PG，施工 ⑤）；worker 进程本身未做（派活契约未定），见 §9.8 |
 | X0 | 三 hash 留痕（`run_artifacts`） | ⬜ |
 
 ## 9. 接口对表（M8 前置 · ✅ 2026-10-22）
@@ -127,12 +127,18 @@ type WorkerRegistry interface {
     Drain(ctx context.Context, workerID string) error
     List(ctx context.Context) ([]WorkerRecord, error)
 }
+
+// WorkerReaper 是 WorkerRegistry 的**可选能力**（§9.7 R10，2026-10-24 落地；
+// §9.6：加可选能力走新接口 = MINOR，上面 4 个方法一个字没动）。
+type WorkerReaper interface {
+    ReapOffline(ctx context.Context, now time.Time, timeout time.Duration) (int, error)
+}
 ```
 
 | 方法 | 今天 | 契约位 | 错误语义（本表冻结） | 版本策略 |
 |---|---|---|---|---|
 | `Enqueue` | 无（`CreateJob` 直接插行并起 goroutine） | contracts | 幂等键必填；同键同 `request_hash` → 返回原行、`created=false`、`err=nil`；同键不同 hash → `ErrIdempotencyConflict`；键为空 → `ErrInvalidInput`；队列深度达上限 → `ErrQueueFull`（HTTP 429）。**不执行、不路由**（market→kernel 已在调用方解析完） | 新增 port = MINOR；方法签名改 = MAJOR |
-| `Claim` | 无 | contracts | 原子领取一条 `pending` 且 `lease_until IS NULL OR < now()` 的行，写 `running` + `worker_id` + `lease_until`；无活 → `(nil, nil)`；draining worker → `ErrWorkerDraining`；`lease <= 0` → `ErrInvalidInput`。并发安全 = `SKIP LOCKED` 或等价 | 同上 |
+| `Claim` | 无 | contracts | 原子领取一条 `pending` 且 `lease_until IS NULL OR < now()` 的行，写 `running` + `worker_id` + `lease_until`；无活 → `(nil, nil)`；**非 active** 的已注册 worker（draining / offline）→ `ErrWorkerDraining`；`lease <= 0` → `ErrInvalidInput`。并发安全 = `SKIP LOCKED` 或等价 | 同上 |
 | `RenewLease` | 无 | contracts | 只允许当前 owner 在租约有效期内续；行不存在 / 已终态 / 别人持有 / 租约已过期 → `ErrLeaseLost`（worker 必须**立即停止**，不得再写结果） | 同上 |
 | `Complete` | `UpdateJobCompleted`（无 owner 校验） | contracts | 必须持有效租约；写 `status=completed` + `result_status` + `result_uri`；`result_status` ∈ `{completed, invalid}`（**`failed` 走 `Fail`**，其他值 → `ErrInvalidInput`）；`result_uri` 必须非空（结果内容不在 `run` 里，空指针 = 结果不可达）；同一终态同载荷重复调用 → `nil`（幂等）；不同载荷 / 已 `failed` / 已 `cancelled` → `ErrInvalidTransition`；租约过期 → `ErrLeaseLost` | 终态语义变更 = MAJOR |
 | `Fail` | `UpdateJobFailed`（把 invalid 也塞进来） | contracts | 必须持有效租约；写 `status=failed` + `error_message`；`resultStatus` ∈ {`""`, `failed`}——确实产出过 ResultSpec 传 `failed`，否则传空串（列写 NULL）；其他值 → `ErrInvalidInput`；重复调用幂等 | 同上 |
@@ -149,10 +155,11 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 那层 CASE + `btrim`。少写任何一层都会造成同一行一边能领、另一边领不到——钉子是
 `qtest` 的 `ClaimByKernelReadsOnlyStringKernels`（两个实现跑同一条用例）。
 
-| `Register` | 无 | contracts | 同 `worker_id` 重复注册 = 覆盖能力/心跳（幂等），不允许两个进程共用同一 id（由装配方保证）；空 id → `ErrInvalidInput` | 新增 = MINOR |
-| `Heartbeat` | 无 | contracts | 未知 worker → `ErrWorkerNotFound`（**不自动注册**，fail-loud）；draining → 只更新心跳、返回 `nil` | 同上 |
+| `Register` | 无 | contracts | 同 `worker_id` 重复注册 = 覆盖能力/心跳（幂等），不允许两个进程共用同一 id（由装配方保证）；空 id → `ErrInvalidInput`。status：已 drain 的**永远保留**；`offline` 且从未请求 drain 的回到 `active`（存活证明，且刷新心跳，见 R10） | 新增 = MINOR |
+| `Heartbeat` | 无 | contracts | 未知 worker → `ErrWorkerNotFound`（**不自动注册**，fail-loud）；draining → 只更新心跳、返回 `nil`；`offline` 且从未请求 drain → 回到 `active`（同上） | 同上 |
 | `Drain` | 无（只有进程级 `Shutdown`） | contracts | 未知 worker → `ErrWorkerNotFound`；`active → draining`；重复 drain → `nil`（幂等）；`offline` → `ErrInvalidTransition` | 同上 |
 | `List`（worker） | 无 | contracts | 空列表 = `[]`，不是 `nil`（JSON 稳定） | 同上 |
+| `ReapOffline`（可选接口 `WorkerReaper`） | 无 | contracts | `timeout <= 0` → `ErrInvalidInput`（阈值属部署配置，不给默认值）；`last_heartbeat_at <= now-timeout`（含等于）→ `offline`，**不删行**、已 offline 不重复计数、NULL 心跳不参与判定；`draining` 同样在回收范围内（滚动升级的收尾）；返回本轮迁移行数 | 可选新接口 = MINOR（§9.6）；改判定判据 = MAJOR |
 | `EngineRunner.RunBacktest` | `pkg/backtest/contracts/contracts.go:404` | contracts（frozen） | 返回值 `Status` 是唯一判据；`error` 只装真实故障；未注册内核 `ErrKernelNotRegistered`，**零静默回退**（`tellurion-contracts:docs/API.md` §5.2） | **不改**（QT-44 ④ 明文） |
 | `EngineRegistry.Resolve` | `pkg/backtest/contracts/registry.go:97` | contracts | 未注册 → `ErrKernelNotRegistered`；`Register` 仅装配期、重名 panic | **不改** |
 | `MarketRouter.ResolveKernel` | `pkg/backtest/contracts`（DBT-06） | contracts | 未登记市场 → `ErrMarketNotRegistered`；路由表未装配 → **创建即拒绝、job 不落库** | **不改** |
@@ -255,7 +262,7 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 
 **`run.walk_forward_reports`**：`wf_id TEXT PK`、`idempotency_key`（唯一）、`request_json JSONB`、`window_config JSONB`、`status`、`total/completed/invalid/failed_windows`、`report_uri TEXT`（明细指针）、`summary_json JSONB`、`created_at/completed_at`。每个窗口的 train/test 是 `backtest_jobs` 的独立行（各自 `run_artifacts`）；窗口→run 的关系见 §9.7 R6。
 
-**`run.worker_registry`**：`worker_id TEXT PK`、`kernels TEXT[]`、`status TEXT CHECK (active|draining|offline)`、`last_heartbeat_at TIMESTAMPTZ`、`drain_requested_at TIMESTAMPTZ`、`started_at TIMESTAMPTZ`、`meta JSONB`；心跳超时 → `offline`（由 `ReapExpired` 同批次处理），不是删行。
+**`run.worker_registry`**：`worker_id TEXT PK`、`kernels TEXT[]`、`status TEXT CHECK (active|draining|offline)`、`last_heartbeat_at TIMESTAMPTZ`、`drain_requested_at TIMESTAMPTZ`、`started_at TIMESTAMPTZ`、`meta JSONB`；心跳超时 → `offline`（由 `WorkerReaper.ReapOffline` 写入，`cmd` 与 `ReapExpired` 同一轮周期任务调用；R10），不是删行。
 
 **`quant.strategy_state`**：**不在本表**（H5；`strategy_state` 归 strategy-runtime 模块，core 写 `quant.strategy_state`）。
 
@@ -286,8 +293,9 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | R7 | **队列深度与 `queue_full` 阈值** | 今天无上限（每 job 一个 goroutine）；429 语义在新端点冻结，但阈值是部署配置 | 契约只冻结「达上限 → 429 + `queue_full`」；默认值由部署配置给出（建议 `max_pending = worker 数 × 4`，压测后定），不进契约 |
 | R8 | **`cancelling` 行的租约回收出口**（2026-10-23 施工 ① 新登记；**已裁 2026-10-23 = 选 (a)**；**已落 施工 ④，两个实现同批**） | §9.5 的 `ReapExpired` 只定义了 `running` 的回收：`cancelling` 行的 owner 若崩溃，`AckCancel` 因租约过期拒绝、`ReapExpired` 又不处理它——该行会永久停在中间态 | ✅ 落地形状：`ReapExpired` 的第二类迁移「`cancelling` 且租约过期 → `cancelled`」，**不**计 attempts（它不是重试，是给已作废的结果收尾）。内存侧在 `Memory.ReapExpired` 的分支里；PG 侧是 `reapCancellingSQL` 这条**独立语句**（`reapSQL` 保持原样：两条判据不同形就不合并成一条带 CASE 的 UPDATE）。钉子：`qtest.ReapLandsOrphanedCancellingRow`（两侧同跑），破坏腿见 `docs/TASKS.md` 施工 ④ |
 | R9 | **按内核能力（`Kernels`）领取过滤**（2026-10-23 施工 ① 自审新登记；**已裁 2026-10-23 = 加可选新接口（MINOR）——既不是 (a)，也不是当初倾向的 (b)**；**已落 施工 ④**） | §9.3 写 `Kernels` 用于"未知内核的 worker 不接该活"，但 §9.2 冻结的 `Claim(ctx, workerID, lease)` **没有内核参数**——过滤无法在领取点实现；`WorkerRecord.Kernels` 落了库但没有消费方 | ✅ 落地形状：新接口 `KernelAwareJobQueue.ClaimByKernel`——§9.6「加可选能力走新接口 = MINOR」那条的第一次实际使用，冻结的 10 方法集一字未动（(a) 会破 §9.6，(b) 会让能力声明继续只落库）。能力取 worker **在注册表里声明的** `Kernels`，不是调用方现传；未注册 / 无声明 / 注册表未装配 ⇒ 不过滤。行的生效内核抽取规则见 §9.2 那条口径（只有 JSON 字符串算内核）。钉子：`ClaimByKernelReadsOnlyStringKernels`（两侧同口径）+ `ClaimWithoutKernelFilterStaysUnfiltered`（证明冻结面没被顺手加上过滤）。**仍未落**：worker 进程本身（本仓没有引擎），消费方目前只有套件与两个编译期断言 |
+| R10 | **worker 心跳超时 → `offline`**（2026-10-24 施工 ⑤ 落地；裁决同 R9：加可选新接口 = MINOR） | §9.3 的 `WorkerStatus` 有 `offline`，但冻结的 4 方法集没有把 worker 推过去的入口——心跳一停，注册表里仍是 `active`，`Claim` / `ClaimByKernel` 继续把活派给一个已经死掉的 worker。补方法 = MAJOR（实现方全红），不补则 `offline` 永远是死状态 | ✅ 落地形状：可选接口 `WorkerReaper.ReapOffline(ctx, now, timeout)`——判据只有心跳时间（`last_heartbeat_at <= now-timeout`，含等于），`draining` 一并回收（滚动升级的收尾），不删行。**offline 是推断，不是运维意图**：心跳 / 重注册是存活证明，可把未请求过 drain 的 worker 拉回 `active`（并刷新心跳，否则下一轮立刻再判离线）；请求过 drain 的不可（否则 drain 可被一次重注册绕过）。理由：不这样做，worker id 会被一次瞬时超时永久作废（崩溃重启是同一个 id，没有别的恢复入口）。代价：`Claim` 对 offline 仍报 `ErrWorkerDraining`——冻结面只有一个「不配领新活」的哨兵，本单不新增错误语义；装配方要么开回收、要么显式关掉（`cmd` 在开启时 fail-closed 检查能力，见 §9.8）。钉子：`qtest` 的 `ReapOfflineMarksStaleWorkersOffline` / `ReapOfflineRejectsNonPositiveTimeout` / `OfflineWorkerRevivesOnProofOfLifeUnlessDrained` / `OfflineWorkerIsNotDispatchedUntilProofOfLife`（两个实现同跑） |
 
-### 9.8 实现现状（2026-10-23，施工 ③）
+### 9.8 实现现状（2026-10-23 起，施工 ③④⑤）
 
 > 本节是给下一个 agent 的判据：只看本仓即可分辨「已落地」与「只是接口就位」。与 §9.5 冲突时以 §9.5 为准（那是冻结形状）。
 
@@ -296,11 +304,11 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | 文件 | 内容 | 对应 |
 |---|---|---|
 | `model.go` | `RunStatus` 六态 / `ResultStatus` 三值 / `RunRecord` / `ListFilter` / `WorkerStatus` / `WorkerRecord` / `DefaultKernel`+`KernelOf`+`MatchesKernels`（生效内核抽取规则，§9.2 口径） | §9.3 B 组 |
-| `ports.go` | `JobQueue`（10 方法，冻结）/ `WorkerRegistry`（4 方法）/ **可选** `KernelAwareJobQueue`（1 方法，R9 裁决的落点，§9.6「新接口 = MINOR」第一次实际使用）——方法集按 §9.6 冻结 | §9.2 A-1 |
+| `ports.go` | `JobQueue`（10 方法，冻结）/ `WorkerRegistry`（4 方法）/ **可选** `KernelAwareJobQueue`（R9）/ **可选** `WorkerReaper`（R10，心跳超时 → offline）——方法集按 §9.6 冻结，两条可选能力都是「新接口 = MINOR」 | §9.2 A-1 |
 | `errors.go` | 8 个领域哨兵（wire code 归 HTTP 层，本包不定义） | §9.4 |
 | `hash.go` | `Canonicalize`（键排序 + 去空白 + 保留数字原文）/ `RequestHash` = sha256 | §9.5 `request_hash` |
 | `memory.go` | `JobQueue` 内存实现（幂等 / 领取 / 租约 / 两轴终态 / 取消 / 回收）+ `ClaimByKernel`（与 `Claim` 共用一个 `claim` 体，只差一条过滤）；`ReapExpired` 两类迁移（running / orphaned cancelling） | X5a |
-| `worker.go` | `WorkerRegistry` 内存实现（注册 / 心跳 / drain） | X5c |
+| `worker.go` | `WorkerRegistry` 内存实现（注册 / 心跳 / drain）+ `WorkerReaper.ReapOffline`（心跳超时 → offline；offline 的存活证明可复活，drain 意图不可） | X5c |
 | `ddl.go` | `run` schema 5 表 + 7 索引；`Migrations()` 返副本 | §9.5 D 组、`db-schema.md` §5 |
 
 **落地包（`internal/httpapi`，施工 ②）**
@@ -318,10 +326,10 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 |---|---|---|
 | `internal/pgstore/store.go` | `Open`（DSN 空 fail-closed，不退回内存）/ `Migrate`（按序幂等执行 `queue.Migrations()`）/ `Options` / `jobCols` 派生两条列清单 / `rowToJob`（NULL↔零值、UTC、CHAR 补齐裁剪）/ `lockJob`（`FOR UPDATE`）/ `checkLease` | §9.2 A-1、§9.5 |
 | `internal/pgstore/queue.go` | `JobQueue` 的 PG 实现 10 方法 + 可选的 `ClaimByKernel`：`Claim`/`ClaimByKernel` 共用**一条** `claimSQL`（`$4::text[]` 传 NULL 即不过滤，两个入口不会各写一份 SQL 而漂掉），`FOR UPDATE SKIP LOCKED` + `priority DESC → created_at → id`；`Enqueue` 在 `pg_advisory_xact_lock` 里做「查键 → 数深度 → 插行」；终态方法先锁行再按 §9.5 两轴映射表判定；回收是 `reapSQL`（running）+ `reapCancellingSQL`（R8）两条语句、**同一个事务**（否则半迁移态配一个 count 返回值是错的） | X5a 的 durable 侧 |
-| `internal/pgstore/registry.go` | `WorkerRegistry` 的 PG 实现（UPSERT 保 status/started_at/drain 时刻） | X5c 的 durable 侧 |
-| `internal/qtest/suite.go` | **语义套件**：30 条队列用例 + 6 条注册表用例 + 5 条跨 port 用例 = 每个实现 41 条，内存与 PG 各跑一遍 | §9.8「换 PG 实现时行为不变」的可执行判据 |
+| `internal/pgstore/registry.go` | `WorkerRegistry` 的 PG 实现（UPSERT 保 status/started_at/drain 时刻；offline 的复活与心跳刷新是同一条 UPDATE 的 CASE）+ `reapOfflineSQL`（R10） | X5c 的 durable 侧 |
+| `internal/qtest/suite.go` | **语义套件**：30 条队列用例 + 9 条注册表用例 + 6 条跨 port 用例 = 每个实现 45 条（施工 ⑤ 新增 3 条注册表 + 1 条跨 port），内存与 PG 各跑一遍 | §9.8「换 PG 实现时行为不变」的可执行判据 |
 | `internal/testdb/testdb.go` | PG 腿 harness：跨测试**进程**的会话级 advisory lock + 每用例前清库 | 见下方「施工 ③ 的三条实测」第 3 条 |
-| `cmd/orchestrationservice/main.go` | 进程装配：`-dsn`/`ORCHESTRATION_DSN`（两者都空即拒绝启动）→ `Migrate` → 监听（`127.0.0.1:8088`，jobs 4 端点 + `/healthz`）+ 周期 `ReapExpired`（`-reap-interval`，默认 30s） | §9.5 建表入口、`dataflow.md` §2 第 7 步 |
+| `cmd/orchestrationservice/main.go` | 进程装配：`-dsn`/`ORCHESTRATION_DSN`（两者都空即拒绝启动）→ `Migrate` → 监听（`127.0.0.1:8088`，jobs 4 端点 + `/healthz`）+ 周期回收（`-reap-interval` 默认 30s：租约 `ReapExpired` + 心跳 `ReapOffline`，后者由 `-heartbeat-timeout` 默认 90s 控制，0 = 关闭；开启时装配期 fail-closed 检查注册表确实实现了 `WorkerReaper`） | §9.5 建表入口、`dataflow.md` §2 第 7/8 步 |
 | `internal/pgstore/*_test.go` | PG 专属腿：迁移幂等 + 表/索引形状、列清单双向核对、`CHAR(64)` 补齐、三条库约束（唯一索引 / 两个 CHECK / FK）、租约谓词、`request_canonical` 锚点、并发领取不重发 | 破坏验证的落点 |
 
 **PG 侧口径（施工 ③）**：① 时间一律由**应用侧** UTC 时钟提供（`ReapExpired` 的签名本来就收 `now`；内存实现同样如此），不用 DB 的 `now()`——混用会让「租约是否过期」在一次调用里有两个答案；代价是跨进程时钟漂移直接移动租约边界，部署必须让 worker 与 PG 同时钟源。② 读路径的 `RequestJSON` 取 `request_canonical`（TEXT 锚点），`request_json`（JSONB）只作查询投影。③ 端口 `8088` 是本仓自定的监听地址（`-addr` 可覆盖），不在任何跨仓契约里；⚠️ 同期兄弟仓的 `cmd` 默认值有撞号（strategy `:8085` = core 的 analysis-service，risk `:8086` = ai-service，analytics `:8087`），登记在此、属跨仓问题，不由本仓单方面改别人的默认值。
@@ -345,14 +353,14 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | 两轴终态（`completed+completed` / `completed+invalid` / `failed+failed` / `failed+NULL`） | ✅ 内存 + PG |
 | 取消（`pending`→`cancelled` 保留行；`running`→`cancelling`；owner `AckCancel`） | ✅ 内存 + PG |
 | 租约回收（`attempts+1` / `attempts_exhausted`） | ✅ 内存 + PG（`SKIP LOCKED` 可重入）；`cmd` 里有周期调用 |
-| worker 注册 / 心跳 / drain（重复注册不洗回 `active`，也不重置 `started_at`） | ✅ 内存 + PG |
+| worker 注册 / 心跳 / drain（已 drain 的不因重注册洗回 `active`，也不重置 `started_at`） | ✅ 内存 + PG |
 | 跨进程共享队列（A 提交 / B 领取写终态 / A 查到结果） | ✅ `cmd/orchestrationservice` 的端到端腿（真库，两个独立连接池） |
 | `run` schema 建表 | ✅ DDL 落盘 + `pgstore.Migrate` 启动执行；已在真库跑过（含幂等重跑） |
 | 按内核能力（`Kernels`）过滤领取 | ✅ 内存 + PG（施工 ④，R9 裁决落地）——可选接口 `KernelAwareJobQueue.ClaimByKernel`；抽取规则两侧同口径由 `ClaimByKernelReadsOnlyStringKernels` 钉住。**消费方仍是空的**：本仓没有 worker 进程，目前只有套件与两个编译期断言用到它 |
 | `cancelling` 行的租约回收出口 | ✅ 内存 + PG（施工 ④，R8 裁决落地）——租约过期的 `cancelling` 行落 `cancelled`，不计 attempts；`cmd` 的周期回收同批带上 |
 | 入队前「内核 / 市场可解析」校验（§9.4 fail-closed ①） | ⬜ 未实现（依赖 `EngineRegistry` / `MarketRouter`，本仓不引） |
 | `batch` / `walkforward` / `run_artifacts` / 其余 C 组端点（batch / walkforward / worker / provenance） | ⬜ 未实现（X5b / X0）；jobs 4 端点已落（见上表） |
-| worker 心跳超时 → `offline` | ⬜ 未实现（方法集冻结，无回收方法；补要新接口 = MINOR，见 R8 同类问题） |
+| worker 心跳超时 → `offline` | ✅ 内存 + PG（施工 ⑤，R10）——可选接口 `WorkerReaper.ReapOffline`；`offline` 的 worker 不再被派活（`Claim` / `ClaimByKernel` 同一个 active 门），存活证明（心跳 / 重注册）可复活未 drain 的 worker。**消费方**：`cmd` 的周期回收；worker 进程本身仍未做 |
 
 **故意取舍（施工 ①②③ 累计）**
 
@@ -366,6 +374,6 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 8. **时间戳由应用侧给，不用 DB 的 `now()`**（施工 ③）：`ReapExpired(ctx, now)` 的冻结签名本身就收 `now`，内存实现也用自己的时钟；混用会让一次调用里「租约是否过期」有两个答案。代价：跨 worker 进程时钟漂移直接移动租约边界 ⇒ 部署需同时钟源（NTP），已在「PG 侧口径」写明。
 9. **`request_canonical` 与 `request_json` 存同一份内容两种形状**（施工 ③）：前者是 identity 的字节锚点、后者是查询投影。看起来像冗余存储，但红线 6「不存结果内容」管的是结果本体，不是请求身份；不这么做的替代方案是把 `request_json` 改成 TEXT（丢掉可查询性）或在读时复算 hash（实测会漂）。加列 = MINOR（§9.6）。
 10. **PG 腿跨测试进程排队**（施工 ③）：`internal/testdb` 用会话级 advisory lock 把两个包的 PG 腿串行化。代价是本地跑全套 PG 腿约 3-4 秒；换来的是不再有「只有 `go test ./...` 才红、单跑永远绿」的假红。
-11. **`offline` 那条迁移不在套件里凑**（施工 ③）：port 里没有把 draining 推到 offline 的入口（§9.8 未落项），套件只测「从 port 可达」的状态机分支；用直接改库凑出来的覆盖比空白更容易骗人。
+11. **`offline` 的进入与退出都要有可执行的入口**（施工 ③ 原口径「不在套件里凑」，施工 ⑤ 收口）：施工 ③ 时 port 里没有 draining → offline 的入口，套件拒绝用「直接改库」凑覆盖（凑出来的绿比空白更容易骗人）。施工 ⑤ 用可选接口 `WorkerReaper` 补上了入口，所以那条断言现在走的是真 port；同时定死退出规则——`offline` 是**推断**，未请求过 drain 的可以被心跳 / 重注册拉回 `active`（并刷新心跳），请求过 drain 的不能（运维意图优先）。代价：`Claim` 对 offline 仍报 `ErrWorkerDraining`（冻结面只有一个「不配领新活」的哨兵，不新增错误语义），调用方要看报文里的实际状态。
 
-**自检结论**（施工 ④ 后）：语义面与 durable 面都已落地——`JobQueue` / `WorkerRegistry` 各有两个实现（内存 + PG），跑的是**同一套** qtest 用例（每个实现 41 条 = 队列 30 + 注册表 6 + 跨 port 5；`go test -v` 实测计数，施工 ③ 本节写的「37 条」是**误记**——那时跨 port 实际只有 1 条，本次重数才暴露），PG 腿在真库上绿；`cmd/orchestrationservice` 能在启动时建库并对外提供 jobs 4 端点，端到端跨进程共享队列有实测腿；R8 / R9 两条已裁事项的代码也已同批落在两个实现上。**仍未完成**：X5b（batch / walkforward）、X0（`run_artifacts` 写入 + `/provenance`）、worker 领取执行的装配（本仓没有引擎，故 `ClaimByKernel` 目前没有生产消费方）、鉴权（R5）、以及 `pkg/backtest` 侧的迁移（属 core，见 `docs/TASKS.md` 验收对照）。判据是「队列的 durable 形状已可运行，批量/前向/坐标三面还是空的」。
+**自检结论**（施工 ⑤ 后）：语义面与 durable 面都已落地——`JobQueue` / `WorkerRegistry` 各有两个实现（内存 + PG），跑的是**同一套** qtest 用例（每个实现 45 条 = 队列 30 + 注册表 9 + 跨 port 6；`go test -v` 实测计数，施工 ③ 本节写的「37 条」是**误记**——那时跨 port 实际只有 1 条，施工 ⑤ 重数才暴露），PG 腿在真库上绿（R10 之前的部分；R10 的 PG 腿本轮因本机无库**未跑**，如实登记在 `docs/TASKS.md` 施工 ⑤）；`cmd/orchestrationservice` 能在启动时建库并对外提供 jobs 4 端点，端到端跨进程共享队列有实测腿；R8 / R9 / R10 三条已裁事项的代码已同批落在两个实现上。**仍未完成**：X5b（batch / walkforward）、X0（`run_artifacts` 写入 + `/provenance`）、worker 领取执行的装配（本仓没有引擎，故 `ClaimByKernel` 目前没有生产消费方）、鉴权（R5）、以及 `pkg/backtest` 侧的迁移（属 core，见 `docs/TASKS.md` 验收对照）。判据是「队列的 durable 形状已可运行，批量/前向/坐标三面还是空的」。

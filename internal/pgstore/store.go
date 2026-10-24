@@ -114,6 +114,7 @@ var (
 	_ queue.JobQueue            = (*Queue)(nil)
 	_ queue.KernelAwareJobQueue = (*Queue)(nil)
 	_ queue.WorkerRegistry      = (*Registry)(nil)
+	_ queue.WorkerReaper        = (*Registry)(nil)
 )
 
 // Queue 返回 JobQueue 的 PG 实现。
