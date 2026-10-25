@@ -119,6 +119,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 > 三 hash 由 core 引擎计算，core 有权威表 `quant.run_provenance`；本仓的 `run_artifacts` 重新定义为「**worker 写的投影**」——生产者是未来的 worker（执行完从 core 响应写入），**core 不做双写**。因此：
 > - 生产读面 = core 新增的 `GET /api/backtest/{id}/provenance`（core QT-72，读 `quant.run_provenance ⋈ backtest_jobs`）；
 > - 本仓 `GET /api/runs/{id}/provenance` 与父 GET 的三 hash 字段保留（施工 ⑨ 成果不回滚），但文档/响应须让运维看出 **`producer_pending`**——「查不到」不等于「run 不存在」；
+>   > **⚠️ 2026-10-25 实测订正 + 裁决归属**：`producer_pending` 在本仓**代码零命中**（`grep -rn producer_pending` 在 `*.go` = 0）——它**不是第四个状态码**（不与 `provenance_not_ready` / `provenance_not_found` / `provenance_missing` 三码竞争），而是**本仓端点的一个待实现提示位**。**裁决（2026-10-25，主任口径）⑬**：该提示位**归本仓实现**；**core 侧 QT-72 不引入它**（core 的生产者就是 core 引擎，永远有写者，没有「查不到 ≠ run 不存在」这个问题；core 的三态锚点直接沿用本仓的三个 wire code）。裁决全文见 `tellurion:docs/design/qt-decoupling/cross-repo-decision-record-2026-10-25.md` ⑬。**本仓的动作**：在本仓 `/provenance` 的响应里让运维看得出「生产者未接线」。
 > - worker 落地时由 worker 写入 `run_artifacts`，并用 `saveArtifactSQL` 已有的「13 项身份全等否则 0 行受影响」语义做对拍；**不引入第二个写者**。
 >
 > **施工记录（2026-10-25，施工 ⑩：G3 ① 子 run 入队——`parent_job_id` 的写入方）**：`POST /api/runs/parents` 不再只写父记录：父行落库后逐条入队子 run，`run.backtest_jobs.parent_job_id` 有了唯一写入方。
