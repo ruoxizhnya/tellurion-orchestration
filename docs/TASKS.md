@@ -11,6 +11,8 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 > 每张单六字段（① 目标 ② 上下文 ③ 要求 ④ 约束与非目标 ⑤ 验收 ⑥ 边界），判据见 `tellurion:AGENTS.md` §8.5。
 > 完成即标 ✅（附日期）并移入 `docs/archive/TASKS-YYYY-MM-DD-archived.md`；本文件只留未完成项。
 
+> **第三轮裁决指针（2026-10-25）**：⑱ X0 生产者 = **本仓新增 artifact 写端点**（`POST /api/runs/jobs/{id}/artifacts`，service 角色），core worker 调它、**不直写库**；幂等沿用 `queue.ArtifactStore.SaveArtifact`；**前置 = 本仓先做 R5 鉴权**（kit + policy）。DR⑬ 的 `producer_pending` 响应提示位并入本条。正文见 `tellurion:docs/design/qt-decoupling/cross-repo-decision-record-2026-10-25.md` §五。
+
 ---
 
 ## 一、本仓任务
