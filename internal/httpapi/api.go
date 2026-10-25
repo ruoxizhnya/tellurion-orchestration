@@ -1,5 +1,5 @@
 // Package httpapi 是 `run` 队列的 HTTP 面（C 组 jobs 4 端点 + X5b 父作业
-// 2 端点，docs/ARCHITECTURE.md §9.4）。worker / provenance 端点属 X5c / X0，
+// 2 端点 + X0 provenance 端点，docs/ARCHITECTURE.md §9.4）。worker 端点属 X5c，
 // 不在本切片。
 //
 // 领域语义全部在 internal/queue + internal/plan（哨兵 → wire code 的映射表 =
@@ -23,11 +23,15 @@ import (
 // MaxBodyBytes 是单个请求体上限。提交的 run_spec 是完整 RunSpec JSON，管理面小 JSON。
 const MaxBodyBytes = 1 << 20
 
-// Server 是 jobs 4 端点 + 父作业 2 端点的 HTTP 面。
+// Server 是 jobs 4 端点 + 父作业 2 端点 + provenance 端点的 HTTP 面。
+//
+// artifacts 为 nil 时不注册 provenance 路由：没有留痕表就没有三 hash 可答，
+// 注册了只会给一个假的 404「run 从未产出」，把「未装配」伪装成「没产出」。
 type Server struct {
-	q    queue.JobQueue
-	psvc *parents.Service
-	mux  *http.ServeMux
+	q         queue.JobQueue
+	psvc      *parents.Service
+	artifacts queue.ArtifactStore
+	mux       *http.ServeMux
 }
 
 // Option 是装配可选项（父作业端点需要 ParentStore，单跑 jobs 时不必提供）。
@@ -39,6 +43,16 @@ func WithParents(store queue.ParentStore) Option {
 	return func(s *Server) {
 		if store != nil {
 			s.psvc = parents.New(store)
+		}
+	}
+}
+
+// WithArtifacts 装配 `GET /api/runs/{id}/provenance`（X0）。
+// 未提供时该路由不注册（见 Server 的注释）。
+func WithArtifacts(store queue.ArtifactStore) Option {
+	return func(s *Server) {
+		if store != nil {
+			s.artifacts = store
 		}
 	}
 }
@@ -56,6 +70,12 @@ func New(q queue.JobQueue, opts ...Option) *Server {
 	if s.psvc != nil {
 		s.mux.HandleFunc("POST /api/runs/parents", s.submitParent)
 		s.mux.HandleFunc("GET /api/runs/parents/{id}", s.getParent)
+	}
+	if s.artifacts != nil {
+		// catch-all 而不是 `GET /api/runs/{id}/provenance`：后者与
+		// `GET /api/runs/parents/{id}` 在 `/api/runs/parents/provenance` 上冲突
+		// （互不更具体 ⇒ 注册期 panic）。jobs / parents 都比它具体，仍优先。
+		s.mux.HandleFunc("GET /api/runs/{rest...}", s.provenance)
 	}
 	return s
 }

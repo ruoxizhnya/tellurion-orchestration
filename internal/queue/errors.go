@@ -26,4 +26,12 @@ var (
 	ErrWorkerNotFound = errors.New("queue: worker not found")
 	// ErrParentNotFound 是未知 parent_job_id（batch / walkforward 共用一张父表）。
 	ErrParentNotFound = errors.New("queue: parent job not found")
+	// ErrArtifactNotFound 是 `run.run_artifacts` 里没有这条 run 的留痕（X0）。
+	// 它**不直接等于** HTTP 404：读面还要结合 job 的两轴（非终态 → 409
+	// provenance_not_ready，终态 completed → 500 provenance_missing），见
+	// docs/api-schema.md §2。
+	ErrArtifactNotFound = errors.New("queue: run artifacts not found")
+	// ErrArtifactConflict 是同 run_id 的留痕身份漂移（三 hash / 指针 / 生效参数
+	// 有任何一项不同）。**不覆盖**：覆盖等于把两次 run 的留痕并成一次。
+	ErrArtifactConflict = errors.New("queue: run artifacts identity conflict")
 )

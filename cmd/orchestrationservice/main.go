@@ -32,10 +32,11 @@ import (
 // 「换实现 = 改装配代码」重新出现（core 的 QT-16 为此把 NewEngineDeps 的
 // 字段改成了接口）。
 type Deps struct {
-	Jobs    queue.JobQueue
-	Parents queue.ParentStore
-	Workers queue.WorkerRegistry
-	Store   *pgstore.Store
+	Jobs      queue.JobQueue
+	Parents   queue.ParentStore
+	Workers   queue.WorkerRegistry
+	Artifacts queue.ArtifactStore
+	Store     *pgstore.Store
 }
 
 // 编译期断言：装配点声明的 port 必须真能被 pgstore 的实现满足。
@@ -45,6 +46,7 @@ var (
 	_ queue.ParentStore       = (*pgstore.Parents)(nil)
 	_ queue.WorkerRegistry    = (*pgstore.Registry)(nil)
 	_ queue.WorkerReaper      = (*pgstore.Registry)(nil)
+	_ queue.ArtifactStore     = (*pgstore.Artifacts)(nil)
 )
 
 func main() {
@@ -90,7 +92,13 @@ func run() error {
 
 	workers := store.Registry()
 	jobs := store.Queue(workers, pgstore.Options{MaxQueueDepth: *depth, DefaultMaxAttempts: *maxAttempts})
-	deps := Deps{Jobs: jobs, Parents: store.Parents(), Workers: workers, Store: store}
+	deps := Deps{
+		Jobs:      jobs,
+		Parents:   store.Parents(),
+		Workers:   workers,
+		Artifacts: store.Artifacts(),
+		Store:     store,
+	}
 
 	// 心跳回收是可选能力：要开就得真能开，装配期 fail-closed，而不是运行到
 	// 第一轮才发现注册表根本没实现它（§9.8 取舍 6 的同一类代价）。
@@ -108,7 +116,9 @@ func run() error {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/", httpapi.New(deps.Jobs, httpapi.WithParents(deps.Parents)).Handler())
+	mux.Handle("/", httpapi.New(deps.Jobs,
+		httpapi.WithParents(deps.Parents),
+		httpapi.WithArtifacts(deps.Artifacts)).Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprintln(w, "ok")

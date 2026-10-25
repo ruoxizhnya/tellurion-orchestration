@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-25
-verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧（④ = R8 / R9；⑤ = R10；⑥ = X5b 规划与汇总 + 共享套件；⑦ = 裁-13 父表 `parent_jobs` + `backtest_jobs.parent_job_id` + 提交 / 汇总落库；⑧ = 父作业 HTTP 2 端点 + plan_hash 身份）
+verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨（④ = R8 / R9；⑤ = R10；⑥ = X5b 规划与汇总 + 共享套件；⑦ = 裁-13 父表 `parent_jobs` + `backtest_jobs.parent_job_id` + 提交 / 汇总落库；⑧ = 父作业 HTTP 2 端点 + plan_hash 身份；⑨ = X0 三 hash 读面 `run_artifacts` + `/provenance`）
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -104,6 +104,17 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧（④ = R8 / R9；⑤ = R10�
 > **门禁（真实输出）**：`gofmt -l .` 空；`go build ./...` / `go vet ./...` / `go test ./... -count=1` 全绿（`internal/httpapi 0.080s`、`internal/queue 0.090s`、`internal/pgstore 0.115s`、`cmd/orchestrationservice 0.146s`）；本机无 `ORCHESTRATION_TEST_DSN`，PG 腿按既有约定 skip。本机 `-race` 仍跑不了。
 > **未落（如实）**：子 run 入队（`parent_job_id` 的写入方）与 worker 执行；`GET` 的 `children` 因此通常为空。鉴权仍按裁-15 缓做。
 >
+> **施工记录（2026-10-25，施工 ⑨：X0 三 hash 读面 · B6-4）**：`run.run_artifacts` 的写入端口 + `GET /api/runs/{id}/provenance` + 父 GET 逐子三 hash 落地。**状态仍 🔶**：读面与写入端口已落，**生产者（写入方）仍是 core 引擎**——本仓没有 worker 进程，`SaveArtifact` 今天只被测试与编译期断言消费。
+> **落点**：`internal/queue/artifacts.go`（`ArtifactRecord` 15 字段 + `ArtifactStore` 两方法 + `PrepareArtifact` canonical 校验 + `sameArtifactIdentity`）、`artifact_memory.go`（`MemoryArtifacts`，与 PG **同一套口径**：未知 run 拒绝 / 同身份幂等不刷 `created_at` / 身份漂移 `ErrArtifactConflict`）、`errors.go`（`ErrArtifactNotFound` / `ErrArtifactConflict`；注释写明不直接等于 HTTP 码，要结合 job 两轴）、`internal/pgstore/artifacts.go`（`saveArtifactSQL` = `INSERT … ON CONFLICT (run_id) DO UPDATE SET run_id = EXCLUDED.run_id WHERE <13 项身份全等>`，可空列 `IS NOT DISTINCT FROM`；**0 行受影响 ⇒ 冲突**，不能 `DO NOTHING`——那会把冲突读成成功；FK 23503 ⇒ `ErrJobNotFound`）、`internal/httpapi/provenance.go`（`provenanceView` 15 字段独立 DTO + `provenanceOf` + 三态错误）、`api.go`（`WithArtifacts` 装配项；可选能力 = MINOR，§9.6）、`parents.go`（`children[]` 加 `run_spec_hash` / `dataset_snapshot_hash` / `artifact_hash`）、`cmd/orchestrationservice`（装配 `store.Artifacts()` + 编译期断言）。`BacktestResponse` 的 27 项冻结字段集**一个字未动**。
+> **同源口径**：`result_status` **只从 `backtest_jobs` 取**（`run_artifacts` 无 status 列，不存在第二个判据）；`created_at` 是留痕写入时间，不复用 job 创建时间。三态：非终态 → 409 `provenance_not_ready`；终态 `failed` / `cancelled` 无行 → 404 `provenance_not_found`；`completed` / `invalid` 无行 → 500 `provenance_missing`（**`invalid` 不是 `failed`**，缺留痕同样是完整性破坏）。可空列显式出 `null`，不省略键。
+> **路由口径（实测逼出来的）**：`GET /api/runs/parents/{id}` 与 `GET /api/runs/{id}/provenance` 在 Go 1.22 ServeMux 里对 `/api/runs/parents/provenance` **互不更具体 ⇒ 注册期 panic**。处置是 catch-all `GET /api/runs/{rest...}` 后手工切 `/provenance` 后缀；jobs / parents 两条更具体的路由仍优先，钉子 `TestProvenance_CatchAllDoesNotStealOtherRoutes`。
+> **测试（真实输出）**：`internal/httpapi/provenance_test.go` 6 个顶层用例（含 `ReturnsTheThreeHashesAndK9Conclusion` 的 `completed` / `invalid` 两个子测试）+ 父腿新增 `TestGetParent_ChildrenCarryThreeHashes` / `TestGetParent_ChildrenWithoutArtifactsOmitHashes`；`internal/queue/artifact_test.go` 7 个顶层 + 8 个必填字段子测试；`internal/pgstore/artifacts_test.go` 3 条 + `columns_internal_test.go` 的列形状核对（本机无 DSN ⇒ **skip，不是通过**）。
+> **破坏验证（两条腿，改坏 → 红 → 逐字节还原 → 绿）**：
+> 1. **两轴塌缩**：`provenanceOf` 的 `ResultStatus` 改成 `queue.ResultStatus(job.Status)`（把结论当生命周期）→ `TestProvenance_ReturnsTheThreeHashesAndK9Conclusion/invalid` 红（`result_status = 0xc00002d1f0, want "invalid"`——`invalid` 被读成 `completed`）；还原后 `internal/httpapi/provenance.go` SHA256 = `F70DA9E922AC9B9F7CC8D1D3D2AE19D7EC35EBC459D70D0C577D4AED5B01DFE0` 与改前一致、复绿。⚠️ 第一版破坏是「删掉 `ResultInvalid` 分支」，**没有变红**（`Status == RunCompleted` 兜底仍命中）——如实登记：这条腿第一版不具代表性，换成上面那条才有牙。
+> 2. **父 GET 漏填 `artifact_hash`**：`child.ArtifactHash = art.ArtifactHash` 改成 `_ = art.ArtifactHash` → `TestGetParent_ChildrenCarryThreeHashes` 红（`DatasetSnapshotHash:dataset-hash-x0 ArtifactHash:`）；还原后 `internal/httpapi/parents.go` SHA256 = `CD98B5195C36BCFC45C32BDBC1844E9810FBAB71CE0471CD5D0692D68DBB9575` 与改前一致、复绿。
+> **门禁（真实输出）**：`gofmt -l .` 空；`go build ./...` 退出 0；`go vet ./...` 退出 0；`go test ./... -count=1` 全绿（`cmd/orchestrationservice 0.275s`、`internal/httpapi 0.249s`、`internal/parents 0.105s`、`internal/pgstore 0.143s`、`internal/plan 0.095s`、`internal/queue 0.117s`）。本机 `127.0.0.1:5432` 未监听（`Test-NetConnection` = False）⇒ PG 腿全部 **skip**，不是通过；本机 `-race` 仍跑不了（`CGO_ENABLED=0`、无 C 编译器）。
+> **未落（如实）**：① `run_artifacts` 的**生产者**（core 引擎在日循环前写留痕；本仓零 import core，不能代替）；② worker 进程与 worker 端点；③ 子 run 入队（`parent_job_id` 的写入方，父 GET 的 `children` 因此通常为空）；④ 鉴权（R5 / 裁-15 缓做）。**验收对照（本单 ⑤ ③）**：「provenance 端点返回三 hash」**读面已达成**（两条破坏验证钉住），端到端达成仍要等生产者接线。
+>
 > **⚠️ 工单 G7 的两条验收前提被源码证伪（2026-10-23 实测，如实登记，不当已完成）**：
 > 1. **「`pkg/backtest` 里 `job|batch|walkforward` 零命中」不是本仓能产出的判据**：core `pkg/backtest` 实测 **1032 处命中 / 39 个文件**（`job/job.go` 207、`batch/batch.go` 67、`walkforward/walkforward.go` 34、`aliases.go` 39…）。达成它要的是 core 侧 O3（`tellurion:docs/design/qt-decoupling/orchestration-service-design.md` §7「编排层整体移出 `pkg/backtest`」），而 R1 与本仓 `db-schema.md` §5 冻结的路径是「双写 → 对拍 → 切读 → 停写」——旧路径在 O0 切换前**必须继续服务**。本仓能做的是把 durable 侧与 port 做出来，不能单方面让别人的包变空。
 > 2. **「同一 batch 在服务与旧路径结果一致」与同一张工单的第 2 步自相矛盾**：core 的 batch 只要 `err == nil` 就记 `completed`、从不读 `resp.Status`（`core:pkg/backtest/batch/batch.go:249`），`toBacktestResult` 又把 status 字段丢掉（`:412-446`），于是 K9 `invalid` 被算进 `completed` / `success_count` / 评分均值；工单第 2 步又要求「批量报告不得把 `invalid` 当成功」。**修掉它的代价就是数字不再与旧路径相同**。本仓按「必须相同的部分（网格展开、窗口集合、逐 run 请求派生）钉一致，故意不同的部分（三值计数、失败窗口显式计数）钉分歧」执行，并在 X5b 的验收里逐条写明哪条是哪种。
@@ -137,7 +148,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧（④ = R8 / R9；⑤ = R10�
 | X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① `internal/queue` 语义；② jobs 4 端点 HTTP 面；③ **DDL 已接 PG + 启动迁移 + 双实现共享用例**；④ R8 回收出口 + R9 `ClaimByKernel` 落两个实现）| `QT-44` | 本仓立项 |
 | X5b | batch + walkforward（窗口切分与汇总）🔶 规划与汇总纯函数 + 共享套件（2026-10-24 施工 ⑥）+ **父表 / 子 run 关系 / 提交与汇总落库（2026-10-25 施工 ⑦，裁-13）** + **父作业 HTTP 2 端点（2026-10-25 施工 ⑧，`POST/GET /api/runs/parents`）**；**子 run 入队 / worker 执行未落** | `QT-44` | X5a |
 | X5c | worker 注册 / 心跳 / `drain` / 心跳超时 🔶（施工 ① 内存；③ PG 已落；⑤ 心跳超时→`offline` 两个实现同批 + `cmd` 接线；worker 进程本身未做） | `QT-44` | X5a |
-| X0 | `run_artifacts` 三 hash 留痕 + `/provenance` | `QT-03` | X5a |
+| X0 | `run_artifacts` 三 hash 留痕 + `/provenance` 🔶（施工 ⑨：`ArtifactStore` 写入端口 + 内存 / PG 两个实现、`GET /api/runs/{id}/provenance` 三态、父 GET 逐子三 hash；**生产者（core 引擎写入方）未落**）| `QT-03` | X5a |
 
 ## 二、跨仓指针（不在本仓，勿双写）
 

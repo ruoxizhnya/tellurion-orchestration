@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-25
-verified-by: 施工 ⑧（X5b 父作业 HTTP 面）——新增 `parent_jobs(plan_hash)` 唯一索引（计划身份跨幂等键去重）；提交 / 查询端点已落 `internal/httpapi`，子 run 入队仍未落
+verified-by: 施工 ⑨（X0 `run.run_artifacts` 写入语义落地：`queue.ArtifactStore` 内存 / PG 两个实现，`ON CONFLICT (run_id) DO UPDATE … WHERE <13 项身份全等>`，0 行受影响 = 冲突；生产者未落）
 ---
 
 # DB Schema — tellurion-orchestration
@@ -22,7 +22,7 @@ verified-by: 施工 ⑧（X5b 父作业 HTTP 面）——新增 `parent_jobs(pla
 | `run.parent_jobs` | **父计划（batch / walkforward 共用一张表）**：`kind` + `plan_canonical` / `plan_hash`（唯一，计划身份）+ 三值汇总 + 父状态（裁-13） | DDL 已落并已接 PG（`internal/pgstore.Parents`）；提交 / 汇总写入已落 `internal/parents`；`POST/GET /api/runs/parents` 已落（施工 ⑧）。**子 run 入队未落** |
 | `run.walk_forward_reports` | **迁移期旧表**：前向验证报告（被 `parent_jobs` 取代，停写） | DDL 保留只前滚；不再写入，O1 对拍后删除 |
 | `run.batch_runs` | **迁移期旧表**：批量扫描批次（被 `parent_jobs` 取代，停写） | DDL 保留只前滚；不再写入，O1 对拍后删除 |
-| `run.run_artifacts` | 每次 run 的三 hash（`strategy_ref` / `dataset_snapshot_hash` / `risk_rules_hash`）+ artifact 指针 | DDL 已落（FK 生效已实测）；写入路径与读端点未实现（X0）；🔒 冻结面，变更须走评审 |
+| `run.run_artifacts` | 每次 run 的三 hash（`strategy_ref` / `dataset_snapshot_hash` / `risk_rules_hash`）+ artifact 指针 | DDL 已落（FK 生效已实测）；**写入 / 读已落两个实现**（`queue.ArtifactStore`：内存 + `pgstore.Artifacts`，施工 ⑨）与 `GET /api/runs/{id}/provenance`；**生产者（worker 进程）未落**——本仓没有引擎；🔒 冻结面，变更须走评审 |
 | `run.worker_registry` | worker 注册与心跳（active / draining / offline） | DDL 已落并**已接 PG**（`internal/pgstore` 的 `WorkerRegistry` 实现）；心跳超时 → `offline` 由可选接口 `WorkerReaper.ReapOffline` 写入（施工 ⑤） |
 | `quant.strategy_state`（不属本仓） | 运行状态检查点（断点续跑） | 归 strategy-runtime 模块 · core 写（2026-10-21 裁决，指 `tellurion:docs/design/system-spec-review-2026-10-21.md` H5） |
 
@@ -80,7 +80,7 @@ verified-by: 施工 ⑧（X5b 父作业 HTTP 面）——新增 `parent_jobs(pla
 | 表 | 目标主键 / 唯一键 | 关键语义 |
 |---|---|---|
 | `run.backtest_jobs` | `id`；`UNIQUE(idempotency_key) WHERE NOT NULL`；索引 `(priority DESC, created_at ASC, id ASC) WHERE status='pending'` | `request_json` 是完整 canonical RunSpec 的 **JSONB 投影**（可查询），`request_canonical` 是同一份内容的 **TEXT 字节锚点**——`request_hash` 恒等于 `sha256(request_canonical)`，读路径回后者（JSONB 会把 `1e-05` 规范化成 `0.00001`，拿它复算 hash 会把同一个幂等键判成两次不同请求；实测钉子 `internal/pgstore/hashanchor_test.go`）；`status` 六态；`result_status` K9 三值可空；`worker_id` / `lease_until` / `attempts` / `cancel_requested` 支撑多 worker；`result_uri` 是结果指针；**目标无 `result` 内容列**（迁移期旧列保留只读，切读后删除） |
-| `run.run_artifacts` | `run_id` | 三 hash + `artifact_uri` 是冻结最小集；**无 `status`**（QT-63 ④）；`/provenance` 与本表 ⋈ `backtest_jobs` 取结论 |
+| `run.run_artifacts` | `run_id` | 三 hash + `artifact_uri` 是冻结最小集；**无 `status`**（QT-63 ④）；`/provenance` 与本表 ⋈ `backtest_jobs` 取结论。写入语义（施工 ⑨）：同身份重写幂等、**不刷 `created_at`**；同 `run_id` 身份漂移 → `ErrArtifactConflict`（`ON CONFLICT DO UPDATE … WHERE <身份全等>` 下 0 行受影响），**禁止** `DO NOTHING` 静默吞；未知 `run_id` 由 FK 拒（23503 → `ErrJobNotFound`）；可空列比较用 `IS NOT DISTINCT FROM` |
 | `run.parent_jobs` | `parent_job_id`；`UNIQUE(idempotency_key) WHERE NOT NULL`；**`UNIQUE(plan_hash)`** | **一张表承载两种父**（裁-13）：`kind ∈ {batch, walkforward}`；身份 = `plan_canonical`（TEXT 字节锚点）+ `plan_hash = sha256(plan_canonical)`；**同计划（即使换幂等键）只留一行**——由 `parent_jobs_plan_hash_uidx` 兜底，`EnqueueParent` 先按计划身份查；`total/completed/invalid/failed` 三值计数；`status` 与 job 同词表；`summary_json` 只放排序 / 逐窗结论，不复制子结果 |
 | `run.backtest_jobs.parent_job_id` | 可空 FK → `parent_jobs.parent_job_id`；索引 `WHERE parent_job_id IS NOT NULL` | 子 run 关系**只有这一列**（裁-13 明确不塞 `request_json` 父元数据，那会改 `request_hash` 的语义） |
 | `run.batch_runs` / `run.walk_forward_reports` | 旧键不变 | **迁移期旧表**：由 `parent_jobs` 取代，停写；O1 对拍后删除 |

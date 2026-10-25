@@ -234,6 +234,14 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pe) && pe.Code == "23505"
 }
 
+// isForeignKeyViolation 识别外键违约（23503）。`run_artifacts.run_id` 的 FK 是
+// 「留痕只能指向存在的 run」的数据库兜底；这里把它翻成与内存实现同一条
+// ErrJobNotFound，而不是把驱动错误漏到调用方。
+func isForeignKeyViolation(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "23503"
+}
+
 // inTx 在一个事务里跑 fn：fn 出错即回滚。
 func inTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
 	tx, err := pool.Begin(ctx)

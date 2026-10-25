@@ -66,6 +66,64 @@ func TestJobColumnsMatchTheTableShape(t *testing.T) {
 	}
 }
 
+func TestArtifactColumnsMatchTheTableShape(t *testing.T) {
+	dsn := os.Getenv("ORCHESTRATION_TEST_DSN")
+	if dsn == "" {
+		t.Skip("ORCHESTRATION_TEST_DSN is not set; skipping PostgreSQL legs")
+	}
+	ctx := context.Background()
+	store, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	have := map[string]bool{}
+	rows, err := store.pool.Query(ctx, `
+		SELECT column_name FROM information_schema.columns
+		WHERE table_schema = 'run' AND table_name = 'run_artifacts'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		have[n] = true
+	}
+	rows.Close()
+
+	// artifactColumns 的顺序就是 rowToArtifact 的 Scan 顺序：少一列 / 多一列
+	// 都会静默错位（把 seed 读成 kernel 这类最难查的坏法）。
+	cols := strings.Split(artifactColumns, ",")
+	seen := map[string]bool{}
+	for i, raw := range cols {
+		c := strings.TrimSpace(raw)
+		if c == "" {
+			t.Fatalf("artifactColumns 第 %d 项为空（列清单写坏了）", i)
+		}
+		if !have[c] {
+			t.Fatalf("列 %q 被 artifactColumns 读取但库里没有", c)
+		}
+		seen[c] = true
+	}
+	if len(have) != len(seen) {
+		t.Fatalf("run_artifacts 列数 = %d, artifactColumns = %d（加列必须同批改两处）", len(have), len(seen))
+	}
+	for name := range have {
+		if !seen[name] {
+			t.Fatalf("库里有的列 %q 不在 artifactColumns 里", name)
+		}
+	}
+	if len(have) != len(cols) {
+		t.Fatalf("run_artifacts 列数 = %d, artifactColumns 项数 = %d", len(have), len(cols))
+	}
+}
+
 func TestColumnsOfQualifiesEveryColumn(t *testing.T) {
 	// UPDATE ... FROM 里裸 id 是歧义的（外层表 j 与子查询 c 都有 id）——
 	// 这是 2026-10-23 真库跑出来的第一条红，形状由这条钉住。

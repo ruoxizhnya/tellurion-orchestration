@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-25
-verified-by: 施工 ⑧（X5b 父作业 HTTP 面：`POST /api/runs/parents` 提交、`GET /api/runs/parents/{id}` 读三值汇总与逐子状态；子 run 入队仍未落）
+verified-by: 施工 ⑨（X0 三 hash 读面：`run_artifacts` 写入端口 + `GET /api/runs/{id}/provenance` + 父 GET 逐子三 hash；生产者仍是 core 引擎，未落）
 ---
 
 # Dataflow — tellurion-orchestration
@@ -39,9 +39,10 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 1. `POST /api/runs/jobs` → 校验 `idempotency_key` + RunSpec（market→kernel 在**入队前**解析）→ 算 `request_hash` → 写 `run.backtest_jobs(status=pending)` → 返回 `job_id`。同键同 hash = 原 job（200），同键不同 hash = 409。
 2. worker 领取：原子 `pending → running` + `worker_id` + `lease_until`（PG 实现用 `FOR UPDATE SKIP LOCKED`，领取顺序 `priority DESC → created_at ASC → id ASC`，与内存实现的 tie-break 同形；施工 ③ 已落）；**worker 只执行行里的 `request_json`**，不从扁平列重建请求。
    - **内核匹配已落（施工 ④，R9）**：`Claim` 仍不按内核过滤（§9.2 冻结面，加了就是 MAJOR）；过滤走**可选**接口 `KernelAwareJobQueue.ClaimByKernel`——它读 worker **在注册表里声明的** `kernels`，只领生效内核匹配的行；未注册、注册表未装配、或声明为空 ⇒ 不过滤（与「没登记不等于在 drain」同形）。行的生效内核：**只有 JSON 字符串才算内核**，缺键 / null / 数字 / 顶层非对象 / 空串一律按默认 `go`；两侧同口径的钉子是套件里 `ClaimByKernelReadsOnlyStringKernels`。⚠️ 消费方（真正按能力派活的 worker 进程）本仓还没有，所以今天这条过滤只被套件与编译期断言用到。
-3. 执行期心跳续租（`RenewLease`）；引擎在**日循环之前**写输入身份（interim：core `quant.run_provenance`；O1：`run.run_artifacts`，双写/对拍/切读/停写）。
+3. 执行期心跳续租（`RenewLease`）；引擎在**日循环之前**写输入身份（interim：core `quant.run_provenance`；O1：`run.run_artifacts`，双写/对拍/切读/停写）。**读面已落（施工 ⑨）**：`run_artifacts` 的写入端口 `queue.ArtifactStore.SaveArtifact`（内存 + PG 两个实现）与 `/provenance` 读路径就位；**写入方（生产者）仍在 core 引擎**——本仓没有引擎，`SaveArtifact` 今天只被测试与编译期断言消费。
 4. 终态写一次：`Complete(result_status, result_uri)` 或 `Fail(error, result_status)`。`result_status` 是 K9 三值，和队列 `status` 是**两轴**（`ARCHITECTURE.md` §9.1 F8）；终态的每一行必须符合 §9.5 的**两轴映射表**（`invalid` → `status=completed` + `result_status=invalid`，`error` 为空；failed 时按是否产出 ResultSpec 传 `failed` 或空串）。
-5. `GET /api/runs/jobs/{id}` 查生命周期 + 结果结论；`GET /api/runs/{id}/provenance` 是 `run_artifacts ⋈ backtest_jobs`，**不读** provenance 表里的 status（它没有 status）。
+5. `GET /api/runs/jobs/{id}` 查生命周期 + 结果结论；`GET /api/runs/{id}/provenance`（**施工 ⑨ 已落**）是 `run_artifacts ⋈ backtest_jobs`，`result_status` **只从 `backtest_jobs` 取**——`run_artifacts` 无 status 列，不存在第二个判据。响应是独立 DTO（15 字段），不扩 `BacktestResponse`。三态错误：非终态 → 409 `provenance_not_ready`；终态 `failed` / `cancelled` 无行 → 404 `provenance_not_found`；`completed` / `invalid` 无行 → 500 `provenance_missing`（数据完整性破坏，不是 normal path）。
+   - 路由口径：`GET /api/runs/{id}/provenance` 与 `GET /api/runs/parents/{id}` 在 Go 1.22 ServeMux 里**互不更具体**，注册期 panic。落地方式是 catch-all `GET /api/runs/{rest...}` 后手工切 `/provenance` 后缀；jobs / parents 两条更具体的路由仍优先（钉子 `TestProvenance_CatchAllDoesNotStealOtherRoutes`）。
 
 **取消 / 回收 / 升级**
 
@@ -55,7 +56,7 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
    - 请求形状：batch 传 `{base_run_spec, grid}`；walkforward 传 `{base_run_spec, windows, trading_days}`——**交易日历由调用方传入**（本仓不自造日历），缺 / 非法日期在 HTTP 层就 400 并点名 `walkforward.trading_days[i]`。
    - **规划已落（施工 ⑥，X5b）**：`internal/plan.ExpandBatch`（网格笛卡尔积，网格值浅合并进 `strategy_params`）、`internal/plan.ExpandWalkForward`（只生成完整窗口；train/test 只替换 `start_date` / `end_date`，其余 RunSpec 字段原样保留）。
    - **父记录已落（施工 ⑦，裁-13）**：`internal/parents` 把展开结果折成 `plan_canonical` / `plan_hash`，提交即写 `run.parent_jobs`（`kind` + `total` + `running`）；**身份 = `plan_hash`**（施工 ⑧ 收紧）：同计划（换幂等键也算）→ 原行，同键不同计划 → 409。子 run 关系 = `backtest_jobs.parent_job_id`（**写入方未落**：子 run 入队仍是下一步）。
-10. 子 run 的 `result_status` 逐条可见：`completed` 才进排名 / 聚合；`invalid` / `failed` 显式计数，不静默丢弃。所有窗口失败 → 父 `failed`，不是"成功的空报告"。`GET /api/runs/parents/{id}` 返回三值计数 + `children[]`（每行 `status` 与 K9 `result_status`，`ParentChildLister` 按 `parent_job_id` 读取）；父状态不塌缩：`pending > 0` ⇒ `running`，任一子 `failed` ⇒ `failed`，`invalid` 不拖成 `failed`。
+10. 子 run 的 `result_status` 逐条可见：`completed` 才进排名 / 聚合；`invalid` / `failed` 显式计数，不静默丢弃。所有窗口失败 → 父 `failed`，不是"成功的空报告"。`GET /api/runs/parents/{id}` 返回三值计数 + `children[]`（每行 `status` 与 K9 `result_status`，`ParentChildLister` 按 `parent_job_id` 读取；**施工 ⑨ 起逐子带三 hash**——`run_spec_hash` 恒有（来自 job 行的 `request_hash`），`dataset_snapshot_hash` / `artifact_hash` 仅在有 `run_artifacts` 行时出现，缺失不制造第二个完整性判据）；父状态不塌缩：`pending > 0` ⇒ `running`，任一子 `failed` ⇒ `failed`，`invalid` 不拖成 `failed`。
    - **汇总已落（施工 ⑥；施工 ⑦ 接上落库）**：`AggregateBatch`（必须传计划总数 `plannedTotal`，与逐条回报数不符即拒——漏报不会被当成完成；只对 `completed` 且给出有限 score 的子 run 排名，同分按 `run_id` 升序；`invalid` / `failed` 保留但 `rank=0`）与 `AggregateWalkForward`（单段失败 = 整窗失败；缺段 / 缺窗算 pending）。父状态三条：还有未回报 → `running`；任一 `failed` → `failed`；否则 `completed`（`invalid` 不拖成 `failed`）。评分由执行侧给，本仓不解析结果内容。`internal/parents.ApplyBatchSummary` / `ApplyWalkForwardSummary` 把同一份汇总写回 `parent_jobs` 的三值计数与 `status`（终态同时写 `completed_at`）。
 
 ## 3. 失败模式（每一处 fail-closed 都要能指名）
@@ -78,13 +79,14 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 
 1. 每个 job 有且仅有一个终态（`completed` / `failed` / `cancelled`）；进入终态后不可再迁移。
 2. 幂等键相同 + `request_hash` 相同 → 同一个 `job_id`；同键不同 hash → 409，绝不复用。
-3. 任何 `result_status` 为 `completed` / `invalid` 的 job（队列 `status=completed`）都能通过 `/provenance` 取到三 hash；`failed` / `cancelled` 允许无 provenance（`failed` 若已跑过则可有）。
+3. 任何 `result_status` 为 `completed` / `invalid` 的 job（队列 `status=completed`）都能通过 `/provenance` 取到三 hash；`failed` / `cancelled` 允许无 provenance（`failed` 若已跑过则可有）。**施工 ⑨ 已落读面**（端点 + 三态错误钉住）；**生产者未落**——`run_artifacts` 的写入方仍是 core 引擎（O1 双写/切读），所以这条不变量的端到端成立要等生产者接线。
 4. `drain` 后该 worker 不再接新任务；在途任务跑完（或租约到期被回收）才 `offline`。`offline` 同样不接新任务；未请求过 drain 的 `offline` 可被存活证明（心跳 / 重注册）恢复 `active`，请求过 drain 的不行。
 5. `result_status` 只允许 K9 三值；**不存在第四值**；`invalid` 的 `error` 为空、`invalid_reasons` 在结果里。
 6. 同一 job 的 `running` 租约在任一时刻只有一个有效 owner；过期 owner 的写入被拒。
 7. `run` schema 里没有结果内容（只有指针 + 三 hash）；batch / wf 汇总不复制子结果明细。
 8. 父记录（batch / wf）的 `status` 不是 K9：它是生命周期；子 run 的结论只看各自的 `result_status`。
 9. 同一 `plan_hash` 只有一个父记录：**同计划（即使换了幂等键）返回同一 `parent_job_id`**；`parent_jobs(plan_hash)` 唯一索引是这条不变量的数据库兜底。
+10. 同一 `run_id` 只有一行 `run_artifacts`：同身份重写是**幂等**（返回原行、不刷 `created_at`），身份漂移是**响亮的冲突**（`ErrArtifactConflict`），**不覆盖**。PG 侧靠 `ON CONFLICT (run_id) DO UPDATE … WHERE <13 项身份全等>` 的 0 行受影响兜底（不能写 `DO NOTHING`——那会把冲突读成成功）。
 
 ## 5. 与契约文档的关系
 

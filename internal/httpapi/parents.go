@@ -9,6 +9,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -80,12 +81,19 @@ type parentSubmitBody struct {
 
 // parentChildView 是「逐子状态」的一行。子 run 的结论看 result_status（K9），
 // 不看父状态——两轴不合并（docs/dataflow.md §4 第 8 条）。
+//
+// 三 hash 来自 `run_artifacts`（X0）：`run_spec_hash` 对任何子 run 都取得到
+// （`backtest_jobs.request_hash`），`dataset_snapshot_hash` / `artifact_hash`
+// 只有留痕已写入时才有——未跑完 / 未产出结果时省略键，不伪造空值。
 type parentChildView struct {
-	RunID        string     `json:"run_id"`
-	Status       string     `json:"status"`
-	ResultStatus *string    `json:"result_status"`
-	Error        string     `json:"error,omitempty"`
-	CreatedAt    *time.Time `json:"created_at"`
+	RunID               string     `json:"run_id"`
+	Status              string     `json:"status"`
+	ResultStatus        *string    `json:"result_status"`
+	Error               string     `json:"error,omitempty"`
+	RunSpecHash         string     `json:"run_spec_hash"`
+	DatasetSnapshotHash string     `json:"dataset_snapshot_hash,omitempty"`
+	ArtifactHash        string     `json:"artifact_hash,omitempty"`
+	CreatedAt           *time.Time `json:"created_at"`
 }
 
 // parentView 是 GET 的响应体：父记录 + 三值汇总 + 逐子状态 + 汇总明细。
@@ -233,13 +241,34 @@ func (s *Server) getParent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, row := range rows {
-			children = append(children, parentChildView{
+			child := parentChildView{
 				RunID:        row.ID,
 				Status:       string(row.Status),
 				ResultStatus: resultStatusPtr(row.ResultStatus),
 				Error:        row.ErrorMessage,
+				RunSpecHash:  row.RequestHash,
 				CreatedAt:    timePtr(row.CreatedAt),
-			})
+			}
+			// 只有可能已有留痕的子（终态结论已写）才去读 artifact：pending /
+			// running 的子没有结论，查了必然 NotFound，也答不出坐标。
+			if s.artifacts != nil && row.ResultStatus != "" {
+				art, err := s.artifacts.GetArtifact(r.Context(), row.ID)
+				switch {
+				case err == nil:
+					child.DatasetSnapshotHash = art.DatasetSnapshotHash
+					child.ArtifactHash = art.ArtifactHash
+				case errors.Is(err, queue.ErrArtifactNotFound):
+					// 终态却没有留痕：这里不制造第二个完整性判据——三 hash 的
+					// 完整性由 `/provenance` 的 provenance_missing 报，父列表只
+					// 如实省略这两列。
+				default:
+					// 真错误（连接 / 扫描）不吞：吞掉等于把「读坏了」伪装成
+					// 「这个子没有留痕」。
+					writeError(w, err)
+					return
+				}
+			}
+			children = append(children, child)
 		}
 	}
 

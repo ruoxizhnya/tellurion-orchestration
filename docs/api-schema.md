@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-25
-verified-by: 施工 ⑧（X5b 父作业 HTTP 面落地：`POST /api/runs/parents` + `GET /api/runs/parents/{id}`，取代原「每类父各两端点」的目标形状）
+verified-by: 施工 ⑨（X0 `GET /api/runs/{id}/provenance` 独立 DTO 落地：`result_status` 只从 `backtest_jobs` 取、三态错误、可空列显式 null；`children[]` 逐子带三 hash）
 ---
 
 # API Schema — tellurion-orchestration
@@ -75,8 +75,8 @@ verified-by: 施工 ⑧（X5b 父作业 HTTP 面落地：`POST /api/runs/parents
   "total": 4,
   "counts": { "completed": 1, "invalid": 1, "failed": 1, "pending": 1, "settled": 3 },
   "children": [
-    { "run_id": "…", "status": "completed", "result_status": "invalid", "created_at": "…" },
-    { "run_id": "…", "status": "failed", "result_status": "failed", "error": "engine boom", "created_at": "…" }
+    { "run_id": "…", "status": "completed", "result_status": "invalid", "run_spec_hash": "…64 hex…", "dataset_snapshot_hash": "…", "artifact_hash": "…", "created_at": "…" },
+    { "run_id": "…", "status": "failed", "result_status": "failed", "error": "engine boom", "run_spec_hash": "…64 hex…", "created_at": "…" }
   ],
   "summary": { "…Aggregate* 的明细…": "…" },
   "created_at": "…",
@@ -86,6 +86,7 @@ verified-by: 施工 ⑧（X5b 父作业 HTTP 面落地：`POST /api/runs/parents
 
 - 父 `status` 是生命周期（与 job 同六态），`children[].result_status` 才是 K9 结论；**父状态不塌缩**：`pending > 0` ⇒ `running`，任一子 `failed` ⇒ `failed`，`invalid` 不拖成 `failed`（`dataflow.md` §2 第 10 步）。
 - `children` 由 `JobQueue` 的可选能力 `ParentChildLister` 提供；实现不支持时返回空数组（不伪造状态）。顺序为 `created_at` 升序 → `run_id` 升序。
+- `children[]` 的三 hash（X0）：`run_spec_hash` 取自 `backtest_jobs.request_hash`，任何子 run 都有；`dataset_snapshot_hash` / `artifact_hash` 取自 `run_artifacts`，**只有留痕已写入时才有**（未跑完 / 从未产出的子省略这两个键，不伪造空值）。完整性判据仍由 `/provenance` 的 `provenance_missing` 报，父列表不制造第二个判据。
 
 ### 算力
 
@@ -99,6 +100,34 @@ verified-by: 施工 ⑧（X5b 父作业 HTTP 面落地：`POST /api/runs/parents
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/api/runs/{id}/provenance` | 三 hash + 引擎名 + seed |
+
+**`GET /api/runs/{id}/provenance` 响应形状**（`ProvenanceResponse`，独立 DTO，**不扩**冻结的 `BacktestResponse`）：
+
+```json
+{
+  "run_id": "…",
+  "run_spec_hash": "…64 hex…",
+  "dataset_snapshot_hash": "…",
+  "risk_rules_hash": "",
+  "strategy_ref": "momentum@deadbeef",
+  "artifact_uri": "…",
+  "artifact_hash": "…",
+  "version_hash": "…",
+  "params_hash": "…",
+  "seed": 7,
+  "kernel": "go",
+  "engine_version": "engine-1.0",
+  "fill_timing": "next_open",
+  "result_status": "invalid",
+  "created_at": "…"
+}
+```
+
+- `result_status` **只从 `backtest_jobs` 取**（`run_artifacts` 没有 status 列）；`completed` / `invalid` 是跑完的两个结论，响应里都如实呈现——`invalid` **不是** `failed`。
+- `artifact_uri` / `artifact_hash` / `version_hash` / `seed` 无值时出 **`null`**（内置策略没有独立 artifact；不省略键，读侧不用猜「没有」与「空串」的区别）。
+- `risk_rules_hash` 空串 = **未登记**（QT-42 X3b 之前），不是「无规则」。
+- 错误：非终态 → **409 `provenance_not_ready`**；终态 `failed` / `cancelled` 且无留痕 → **404 `provenance_not_found`**；终态 `completed` / `invalid` 却查不到 `run_artifacts` → **500 `provenance_missing`**（数据完整性，不得当成功使用）；未知 run → **404 `job_not_found`**。
+- 三 hash 是 run **开始后**的产物，**不是入队门槛**（§2 fail-closed ④）。写入路径 = `queue.ArtifactStore`（内存 + PG 两个实现）；本仓没有 worker 进程，生产者随 worker 落地接入。
 
 ### port（给内核用，不是 HTTP）
 
@@ -122,7 +151,7 @@ verified-by: 施工 ⑧（X5b 父作业 HTTP 面落地：`POST /api/runs/parents
 | `worker_not_found` | 404 | `drain` 未知 worker | 不重试 |
 | `invalid_transition` | 409 | 对终态 job / worker 做非法迁移（如 terminal job 再 `Complete`、`offline` worker 再 drain） | 读当前状态再决定 |
 | `provenance_not_ready` | 409 | job 非终态，provenance 尚未写 | 退避轮询 |
-| `provenance_not_found` | 404 | job 终态 `failed` 且从未写 provenance（如路由拒绝） | 读 job 的 `error`；不重试读取 |
+| `provenance_not_found` | 404 | job 终态 `failed` / `cancelled` 且从未写 provenance（如路由拒绝 / 从未跑到写留痕那一步） | 读 job 的 `error`；不重试读取 |
 | `provenance_missing` | 500 | 终态为 `completed` / `invalid` 却查不到 `run_artifacts`（数据完整性破坏） | 告警；**不得**当成功使用 |
 | `queue_full` | 429 | 待领取深度达上限 | 退避重试，**不 silently 丢弃** |
 
