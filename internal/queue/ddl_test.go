@@ -54,6 +54,10 @@ func TestMigrationsCoverAllRunTables(t *testing.T) {
 	if !strings.Contains(normalized, "CREATE INDEX IF NOT EXISTS backtest_jobs_parent_idx ON run.backtest_jobs") {
 		t.Fatal("backtest_jobs.parent_job_id index is missing")
 	}
+	// X5b：计划身份唯一——同计划（换键也算）只能有一个父记录。
+	if !strings.Contains(normalized, "CREATE UNIQUE INDEX IF NOT EXISTS parent_jobs_plan_hash_uidx ON run.parent_jobs") {
+		t.Fatal("parent_jobs.plan_hash unique index is missing")
+	}
 }
 
 // normalizedOf 把一段 SQL 的空白折成单空格，便于子串断言（DDL 里有换行与缩进）。

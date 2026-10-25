@@ -467,6 +467,36 @@ func (q *Queue) List(ctx context.Context, filter queue.ListFilter) ([]*queue.Run
 	return out, nil
 }
 
+// ListChildren 见 queue.ParentChildLister 的契约注释。排序 created_at 升序 →
+// id 升序（与内存实现同形）；未知 parentID 返回空切片，不报 ErrParentNotFound
+// ——父记录是否存在由 ParentStore 判。
+func (q *Queue) ListChildren(ctx context.Context, parentID string) ([]*queue.RunRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := q.pool.Query(ctx, `
+		SELECT `+jobColumns+` FROM run.backtest_jobs
+		WHERE parent_job_id = $1
+		ORDER BY created_at ASC, id ASC`, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("pgstore: list parent children: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*queue.RunRecord, 0)
+	for rows.Next() {
+		rec, err := rowToJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pgstore: list parent children rows: %w", err)
+	}
+	return out, nil
+}
+
 // reapSQL 把租约已到期（含等于 now）的 running 行收回：attempts+1；
 // 超过 max_attempts → failed + attempts_exhausted。
 //

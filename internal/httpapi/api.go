@@ -1,8 +1,9 @@
-// Package httpapi 是 `run` 队列的 HTTP 面（C 组 jobs 4 端点，docs/ARCHITECTURE.md
-// §9.4）。batch / walkforward / worker / provenance 端点属 X5b / X0，不在本切片。
+// Package httpapi 是 `run` 队列的 HTTP 面（C 组 jobs 4 端点 + X5b 父作业
+// 2 端点，docs/ARCHITECTURE.md §9.4）。worker / provenance 端点属 X5c / X0，
+// 不在本切片。
 //
-// 领域语义全部在 internal/queue（哨兵 → wire code 的映射表 = docs/api-schema.md §2）；
-// 本包只做传输：严格解码、状态码选择、零值字段转 null。
+// 领域语义全部在 internal/queue + internal/plan（哨兵 → wire code 的映射表 =
+// docs/api-schema.md §2）；本包只做传输：严格解码、状态码选择、零值字段转 null。
 package httpapi
 
 import (
@@ -14,25 +15,48 @@ import (
 	"strconv"
 	"time"
 
+	"tellurion-orchestration/internal/parents"
+	"tellurion-orchestration/internal/plan"
 	"tellurion-orchestration/internal/queue"
 )
 
 // MaxBodyBytes 是单个请求体上限。提交的 run_spec 是完整 RunSpec JSON，管理面小 JSON。
 const MaxBodyBytes = 1 << 20
 
-// Server 是 jobs 4 端点的 HTTP 面。
+// Server 是 jobs 4 端点 + 父作业 2 端点的 HTTP 面。
 type Server struct {
-	q   queue.JobQueue
-	mux *http.ServeMux
+	q    queue.JobQueue
+	psvc *parents.Service
+	mux  *http.ServeMux
+}
+
+// Option 是装配可选项（父作业端点需要 ParentStore，单跑 jobs 时不必提供）。
+type Option func(*Server)
+
+// WithParents 装配 `POST/GET /api/runs/parents`。未提供时这两条路由不注册：
+// 没有父表就没法回答，注册了只会给一个假的 404「父记录不存在」。
+func WithParents(store queue.ParentStore) Option {
+	return func(s *Server) {
+		if store != nil {
+			s.psvc = parents.New(store)
+		}
+	}
 }
 
 // New 构造 Server 并注册路由。
-func New(q queue.JobQueue) *Server {
+func New(q queue.JobQueue, opts ...Option) *Server {
 	s := &Server{q: q, mux: http.NewServeMux()}
+	for _, opt := range opts {
+		opt(s)
+	}
 	s.mux.HandleFunc("POST /api/runs/jobs", s.submit)
 	s.mux.HandleFunc("GET /api/runs/jobs", s.list)
 	s.mux.HandleFunc("GET /api/runs/jobs/{id}", s.get)
 	s.mux.HandleFunc("DELETE /api/runs/jobs/{id}", s.cancel)
+	if s.psvc != nil {
+		s.mux.HandleFunc("POST /api/runs/parents", s.submitParent)
+		s.mux.HandleFunc("GET /api/runs/parents/{id}", s.getParent)
+	}
 	return s
 }
 
@@ -241,6 +265,10 @@ func classify(err error) (int, string) {
 	switch {
 	case errors.Is(err, queue.ErrJobNotFound):
 		return http.StatusNotFound, "job_not_found"
+	case errors.Is(err, queue.ErrParentNotFound):
+		return http.StatusNotFound, "parent_not_found"
+	case errors.Is(err, plan.ErrInvalidRequest):
+		return http.StatusBadRequest, "invalid_params"
 	case errors.Is(err, queue.ErrIdempotencyConflict):
 		return http.StatusConflict, "idempotency_conflict"
 	case errors.Is(err, queue.ErrQueueFull):

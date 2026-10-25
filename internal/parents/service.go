@@ -95,6 +95,13 @@ func (s *Service) submit(ctx context.Context, idempotencyKey string, pp plan.Par
 	return s.store.EnqueueParent(ctx, rec)
 }
 
+// Get 读一条父记录（GET /api/runs/parents/{id} 用）。未知 id →
+// queue.ErrParentNotFound；父状态与三值计数是已落库的值，不在读路径重算
+// （重算会让「还没汇总」看起来像「已经汇总成另一种状态」）。
+func (s *Service) Get(ctx context.Context, parentID string) (*queue.ParentRecord, error) {
+	return s.store.GetParent(ctx, parentID)
+}
+
 // ApplyBatchSummary 把批量子 run 的结论汇总并写回父记录。
 //
 // 调用方必须为**每个**子 run 交一条 outcome（未回报的用空 ResultStatus）；

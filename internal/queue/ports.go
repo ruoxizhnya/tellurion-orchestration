@@ -95,13 +95,28 @@ type WorkerReaper interface {
 // 生命周期（提交一次、随子 run 结论汇总而变）。**不塞 `RunRecord`**——父表
 // 的身份是 `plan_canonical` / `plan_hash`，不是请求 JSON 的 JSONB 投影。
 type ParentStore interface {
-	// EnqueueParent 幂等写入一条父记录：同键同 plan_hash → 返回原行、created=false；
-	// 同键不同 hash → ErrIdempotencyConflict；键为空 / kind 未知 / hash 与 canonical
-	// 不符 → ErrInvalidInput。**不展开计划、不入队子 run**（那是 service 层的事）。
+	// EnqueueParent 幂等写入一条父记录，身份是 plan_hash：
+	//   - 已存在同 plan_hash 的行（**无论幂等键是否相同**）→ 返回原行、created=false；
+	//   - 同幂等键但不同 plan_hash → ErrIdempotencyConflict；
+	//   - 键为空 / kind 未知 / hash 与 canonical 不符 → ErrInvalidInput。
+	// **不展开计划、不入队子 run**（那是 service 层的事）。
 	EnqueueParent(ctx context.Context, rec *ParentRecord) (parent *ParentRecord, created bool, err error)
 	// GetParent 未知 id → ErrParentNotFound。
 	GetParent(ctx context.Context, id string) (*ParentRecord, error)
 	// SaveParentSummary 写回三值计数 / 父状态 / 明细；未知 id → ErrParentNotFound。
 	// 计数自洽由 ParentSummary.Validate 判（settled ≤ total），越界 → ErrInvalidInput。
 	SaveParentSummary(ctx context.Context, id string, summary ParentSummary) (*ParentRecord, error)
+}
+
+// ParentChildLister 是 JobQueue 的**可选能力**（docs/ARCHITECTURE.md §9.6：
+// 加可选能力走新接口 = MINOR，冻结的 10 方法集不动）。
+//
+// GET /api/runs/parents/{id} 要给出「逐子状态」，但子 run 在
+// `run.backtest_jobs`（JobQueue 的表），不在 `parent_jobs`。把
+// `ListChildren` 塞进冻结的 JobQueue = MAJOR，所以单开接口；装配方用类型断言
+// 探测，不提供该接口的实现只会让响应里的 `children` 为空数组（不伪造状态）。
+type ParentChildLister interface {
+	// ListChildren 返回 parent_job_id = parentID 的子 run，按 created_at 升序、
+	// id 升序（与计划的子 run 顺序一致；未知 parentID 返回空切片，不是错误）。
+	ListChildren(ctx context.Context, parentID string) ([]*RunRecord, error)
 }

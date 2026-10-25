@@ -102,6 +102,8 @@ func (p *Parents) EnqueueParent(ctx context.Context, rec *queue.ParentRecord) (*
 			return fmt.Errorf("pgstore: parent enqueue lock: %w", err)
 		}
 
+		// ① 同幂等键但不同计划 = 调用方改写了意图，必须报冲突（先于计划身份判，
+		//    否则同一个键换计划的请求会被静默当成「计划重放」）。
 		var storedHash string
 		scanErr := tx.QueryRow(ctx,
 			`SELECT parent_job_id, plan_hash FROM run.parent_jobs WHERE idempotency_key = $1`,
@@ -114,9 +116,24 @@ func (p *Parents) EnqueueParent(ctx context.Context, rec *queue.ParentRecord) (*
 			replay = true
 			return nil
 		case errors.Is(scanErr, pgx.ErrNoRows):
-			// 继续插入。
+			// 继续按计划身份查。
 		default:
 			return fmt.Errorf("pgstore: parent idempotency lookup: %w", scanErr)
+		}
+
+		// ② 同计划（哪怕换了幂等键）→ 原行。plan_hash 的唯一索引是这条判据的
+		//    数据库兜底；advisory lock 让「查 → 插」在并发下仍是原子的。
+		scanErr = tx.QueryRow(ctx,
+			`SELECT parent_job_id FROM run.parent_jobs WHERE plan_hash = $1`,
+			hash).Scan(&replayID)
+		switch {
+		case scanErr == nil:
+			replay = true
+			return nil
+		case errors.Is(scanErr, pgx.ErrNoRows):
+			// 继续插入。
+		default:
+			return fmt.Errorf("pgstore: parent plan_hash lookup: %w", scanErr)
 		}
 
 		_, err := tx.Exec(ctx, `
@@ -128,6 +145,8 @@ func (p *Parents) EnqueueParent(ctx context.Context, rec *queue.ParentRecord) (*
 			id, rec.IdempotencyKey, string(rec.Kind), canonical, hash, string(rec.Status),
 			rec.Total, rec.Completed, rec.Invalid, rec.Failed, createdAt)
 		if isUniqueViolation(err) {
+			// 幂等键与 plan_hash 都在锁内查过了，这里唯一能撞的是主键
+			// （与内存实现同一条错误）。
 			return fmt.Errorf("%w: duplicate parent id %q", queue.ErrInvalidInput, id)
 		}
 		if err != nil {

@@ -158,6 +158,11 @@ var migrations = []string{
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS parent_jobs_idempotency_key_uidx
 		ON run.parent_jobs (idempotency_key) WHERE idempotency_key IS NOT NULL`,
+	// 计划身份唯一：同一份计划（plan_hash 相同）只能有一个父记录，即使调用方
+	// 换了幂等键——X5b 的「同计划重复提交返回同一父 id」由这条索引兜底，
+	// 不依赖两个实现各自记得去查。
+	`CREATE UNIQUE INDEX IF NOT EXISTS parent_jobs_plan_hash_uidx
+		ON run.parent_jobs (plan_hash)`,
 	`CREATE INDEX IF NOT EXISTS parent_jobs_kind_status_idx
 		ON run.parent_jobs (kind, status, created_at DESC)`,
 

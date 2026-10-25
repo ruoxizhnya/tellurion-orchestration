@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-25
-verified-by: QT-44 施工 ①②③④⑤⑥⑦（④ = R8 / R9；⑤ = R10；⑥ = X5b 规划与汇总 + 共享套件；⑦ = 裁-13 父表 `parent_jobs` + `backtest_jobs.parent_job_id` + 提交 / 汇总落库）
+verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧（④ = R8 / R9；⑤ = R10；⑥ = X5b 规划与汇总 + 共享套件；⑦ = 裁-13 父表 `parent_jobs` + `backtest_jobs.parent_job_id` + 提交 / 汇总落库；⑧ = 父作业 HTTP 2 端点 + plan_hash 身份）
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -93,6 +93,17 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦（④ = R8 / R9；⑤ = R10；�
 > 3. DDL 把 `backtest_jobs_parent_idx` 改名成 `…_LEG3` ⇒ 第一版断言**假绿**（只比索引前缀，改名后的串仍包含它）；收紧成「索引名 + `ON run.backtest_jobs` 全串」后 `TestMigrationsCoverAllRunTables` 红（`backtest_jobs.parent_job_id index is missing`）；还原后 `internal/queue/ddl.go` sha256 相同（`a318919f…`）且复绿。**这条发现并修掉了一个假护栏**，不是预先设计好的。
 > 诚实登记：PG 腿（`TestPGParentStoreRoundTrip`）本机无 `ORCHESTRATION_TEST_DSN` 时 **skip**，不是通过；`docs/db-schema.md` / `ARCHITECTURE.md` / `api-schema.md` / `dataflow.md` 同批更新。
 > **验收对照（本单）**：① 父表 + 列 + 索引已落（DDL 断言）；② 提交即写父表（`internal/parents` + 两个 `ParentStore` 实现，单测覆盖重放 / 冲突 / 未知 id / 汇总自洽）；③ 汇总复用 `internal/plan`（服务测试逐字段对齐 `Aggregate*`）；④ 本仓零 import core（新增代码无跨仓 import）；⑤ 网格 / 窗口 / 三值计数与旧路径逐位一致（plansuite 双父同跑 + Parent 与 Plan 子 run 逐字节相同）。**未落**：batch / walkforward 的 4 个 HTTP 端点、子 run 入队（`parent_job_id` 的写入方）、worker 执行——需要 `TradingCalendar` 只读 port 与派活契约，不在本单。
+> **施工记录（2026-10-25，施工 ⑧：X5b 父作业 HTTP 端点）**：`POST /api/runs/parents`（batch / walkforward 共用）与 `GET /api/runs/parents/{id}`（三值汇总 + 逐子状态）落地。
+> **落点**：`internal/httpapi/parents.go`（严格解码、wire → `plan.BatchRequest` / `WindowConfig` 折装、字段点名、响应视图）；`api.go` 加 `WithParents` 装配项与 `parent_not_found` / `plan.ErrInvalidRequest` 的 wire 映射；`parents.Service.Get`；`queue.ParentChildLister` 可选接口（`Memory` / `pgstore.Queue` 两个实现，`WHERE parent_job_id=$1 ORDER BY created_at, id`）；`cmd/orchestrationservice` 装配 `store.Parents()`。
+> **身份口径（本单收紧）**：父记录的身份是 **`plan_hash`**，不是幂等键——同计划（换键也算）返回同一父 id（200 `idempotent_replay`），同键换计划 → 409。DDL 追加 `parent_jobs_plan_hash_uidx`（唯一）；`MemoryParents` 加 `byHash`；`pgstore.Parents` 在 advisory lock 内「先按幂等键判冲突 → 再按 plan_hash 判重放 → 才插入」。**顺序是刻意的**：同键换计划必须先报冲突，不能被计划身份静默吞掉。
+> **GET 口径**：`counts` = `completed/invalid/failed` + 派生的 `pending/settled`；`children[]` 的 `status` 是队列生命周期、`result_status` 是 K9（两轴不合并）；父 `status` 直接读落库值，不在读路径重算（重算会把「未汇总」伪装成另一种状态）。`children` 只列已入队的子 run——子 run 入队仍未落，所以今天通常是空数组（如实）。
+> **测试**：`internal/httpapi/parents_test.go`（batch 新建 / 同键重放 / 换键同计划同 id / 同键换计划 409；无效计划 400 点名 kind/batch/grid/trading_days；walkforward 10 日切 3 窗；三值不塌缩 + 逐子状态 + 终态 `completed_at`；空 children 是 `[]`；未知父 404）；`internal/queue/parent_memory_test.go` 新增 plan_hash 身份与 `ListChildren` 两条；`pgstore` 的父表腿补「换键同计划」与 `ListChildren`（无 DSN 时 skip）。
+> **破坏验证（两条腿，改坏 → 红 → 逐字节还原 → 绿）**：
+> 1. 删掉 `MemoryParents.EnqueueParent` 的 `byHash` 分支 → `TestMemoryParents_PlanHashIsTheIdentityAcrossKeys` 红（`duplicate parent id "parent-1"`）、`TestSubmitParent_BatchPlanHashIsTheIdentity` 红（换键同计划 = 400 而非 200）；还原后 `internal/queue/parent_memory.go` SHA256 = `1B0D5930…4F430A2` 与改前一致，复绿。
+> 2. GET 的 `ParentChildLister` 分支短路（`&& false`）→ `TestGetParent_CountsAndChildrenDoNotCollapse` 红（`children = 0, want 3`）；还原后 `internal/httpapi/parents.go` SHA256 = `B3F15516…E4A1B5E6` 与改前一致，复绿。
+> **门禁（真实输出）**：`gofmt -l .` 空；`go build ./...` / `go vet ./...` / `go test ./... -count=1` 全绿（`internal/httpapi 0.080s`、`internal/queue 0.090s`、`internal/pgstore 0.115s`、`cmd/orchestrationservice 0.146s`）；本机无 `ORCHESTRATION_TEST_DSN`，PG 腿按既有约定 skip。本机 `-race` 仍跑不了。
+> **未落（如实）**：子 run 入队（`parent_job_id` 的写入方）与 worker 执行；`GET` 的 `children` 因此通常为空。鉴权仍按裁-15 缓做。
+>
 > **⚠️ 工单 G7 的两条验收前提被源码证伪（2026-10-23 实测，如实登记，不当已完成）**：
 > 1. **「`pkg/backtest` 里 `job|batch|walkforward` 零命中」不是本仓能产出的判据**：core `pkg/backtest` 实测 **1032 处命中 / 39 个文件**（`job/job.go` 207、`batch/batch.go` 67、`walkforward/walkforward.go` 34、`aliases.go` 39…）。达成它要的是 core 侧 O3（`tellurion:docs/design/qt-decoupling/orchestration-service-design.md` §7「编排层整体移出 `pkg/backtest`」），而 R1 与本仓 `db-schema.md` §5 冻结的路径是「双写 → 对拍 → 切读 → 停写」——旧路径在 O0 切换前**必须继续服务**。本仓能做的是把 durable 侧与 port 做出来，不能单方面让别人的包变空。
 > 2. **「同一 batch 在服务与旧路径结果一致」与同一张工单的第 2 步自相矛盾**：core 的 batch 只要 `err == nil` 就记 `completed`、从不读 `resp.Status`（`core:pkg/backtest/batch/batch.go:249`），`toBacktestResult` 又把 status 字段丢掉（`:412-446`），于是 K9 `invalid` 被算进 `completed` / `success_count` / 评分均值；工单第 2 步又要求「批量报告不得把 `invalid` 当成功」。**修掉它的代价就是数字不再与旧路径相同**。本仓按「必须相同的部分（网格展开、窗口集合、逐 run 请求派生）钉一致，故意不同的部分（三值计数、失败窗口显式计数）钉分歧」执行，并在 X5b 的验收里逐条写明哪条是哪种。
@@ -124,7 +135,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦（④ = R8 / R9；⑤ = R10；�
 | 阶段 | 内容 | 上游单号 | 前置 |
 |---|---|---|---|
 | X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① `internal/queue` 语义；② jobs 4 端点 HTTP 面；③ **DDL 已接 PG + 启动迁移 + 双实现共享用例**；④ R8 回收出口 + R9 `ClaimByKernel` 落两个实现）| `QT-44` | 本仓立项 |
-| X5b | batch + walkforward（窗口切分与汇总）🔶 规划与汇总纯函数 + 共享套件（2026-10-24 施工 ⑥）+ **父表 / 子 run 关系 / 提交与汇总落库（2026-10-25 施工 ⑦，裁-13）**；**HTTP 4 端点 / 子 run 入队 / worker 执行未落** | `QT-44` | X5a |
+| X5b | batch + walkforward（窗口切分与汇总）🔶 规划与汇总纯函数 + 共享套件（2026-10-24 施工 ⑥）+ **父表 / 子 run 关系 / 提交与汇总落库（2026-10-25 施工 ⑦，裁-13）** + **父作业 HTTP 2 端点（2026-10-25 施工 ⑧，`POST/GET /api/runs/parents`）**；**子 run 入队 / worker 执行未落** | `QT-44` | X5a |
 | X5c | worker 注册 / 心跳 / `drain` / 心跳超时 🔶（施工 ① 内存；③ PG 已落；⑤ 心跳超时→`offline` 两个实现同批 + `cmd` 接线；worker 进程本身未做） | `QT-44` | X5a |
 | X0 | `run_artifacts` 三 hash 留痕 + `/provenance` | `QT-03` | X5a |
 

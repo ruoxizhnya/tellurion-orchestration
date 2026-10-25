@@ -1,13 +1,14 @@
 ---
 status: active
 last-verified: 2026-10-25
-verified-by: 施工 ⑦（裁-13 父表落地；batch / walkforward 的**对外端点未变**，仍为目标契约——父记录的提交 / 汇总入口目前在 `internal/parents`，尚无 HTTP 面）
+verified-by: 施工 ⑧（X5b 父作业 HTTP 面落地：`POST /api/runs/parents` + `GET /api/runs/parents/{id}`，取代原「每类父各两端点」的目标形状）
 ---
 
 # API Schema — tellurion-orchestration
 
-> **实现状态（2026-10-24，施工 ③/⑥）**：`internal/queue` 已落 `JobQueue` / `WorkerRegistry` 两个 **Go port** + 内存实现 + `run` schema DDL **并已接 PG**（X5a/X5c + 施工 ③）：PG 实现在 `internal/pgstore`，与内存实现跑**同一套**语义用例（`internal/qtest`，每个实现 45 条 = 队列 30 + 注册表 9 + 跨 port 6），启动迁移在 `cmd/orchestrationservice`。`internal/httpapi` 已落**任务 4 端点**（`POST`/`GET list`/`GET {id}`/`DELETE {id}`，§1「任务」表）——端点行为按 §2 的错误码与幂等语义实现，哨兵 → wire code 的映射在 `internal/httpapi/api.go` 的 `classify`。**仍未实现**：batch / walkforward / worker / provenance 端点（X5b / X0）；鉴权（R5 未裁，`unauthenticated` / `forbidden` 暂不产生）。
-> **X5b 父表（2026-10-25 施工 ⑦，裁-13）**：`run.parent_jobs` 与 `run.backtest_jobs.parent_job_id` 已落（内存 + PG 两个 `ParentStore` 实现），`internal/parents` 提供提交（写父表）与汇总（复用 `internal/plan` 写回三值计数）的服务层入口。**没有新增或改变任何端点**——下面 batch / walkforward 的 wire 形状仍是**目标契约**；4 个 HTTP 端点与子 run 入队尚未落地。
+> **实现状态（2026-10-24，施工 ③/⑥）**：`internal/queue` 已落 `JobQueue` / `WorkerRegistry` 两个 **Go port** + 内存实现 + `run` schema DDL **并已接 PG**（X5a/X5c + 施工 ③）：PG 实现在 `internal/pgstore`，与内存实现跑**同一套**语义用例（`internal/qtest`，每个实现 45 条 = 队列 30 + 注册表 9 + 跨 port 6），启动迁移在 `cmd/orchestrationservice`。`internal/httpapi` 已落**任务 4 端点**（`POST`/`GET list`/`GET {id}`/`DELETE {id}`，§1「任务」表）——端点行为按 §2 的错误码与幂等语义实现，哨兵 → wire code 的映射在 `internal/httpapi/api.go` 的 `classify`。**仍未实现**：worker / provenance 端点（X5c / X0）；鉴权（R5 未裁，`unauthenticated` / `forbidden` 暂不产生）。
+> **X5b 父表（2026-10-25 施工 ⑦，裁-13）**：`run.parent_jobs` 与 `run.backtest_jobs.parent_job_id` 已落（内存 + PG 两个 `ParentStore` 实现），`internal/parents` 提供提交（写父表）与汇总（复用 `internal/plan` 写回三值计数）的服务层入口。
+> **X5b 父作业端点（2026-10-25 施工 ⑧）**：`POST /api/runs/parents` 与 `GET /api/runs/parents/{id}` 已实现（`internal/httpapi/parents.go`）——batch / walkforward 共用一套父记录与身份（`plan_hash`），原「每类父各 POST + GET」的 4 个目标端点**不再作为目标契约**（从未实现，无调用方）。子 run 入队与 worker 执行仍未落。
 > 本文件是**目标契约**，不是现状说明书；开工顺序见 `docs/TASKS.md` 的「施工序」。
 > **请求 / 响应形状、状态机、幂等键与 `run` schema 的目标键**见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9（M8 接口对表）。本文件只钉**对外行为**（方法、路径、错误码、幂等），不重复字段表。
 
@@ -26,14 +27,65 @@ verified-by: 施工 ⑦（裁-13 父表落地；batch / walkforward 的**对外�
 | DELETE | `/api/runs/jobs/{id}` | 取消 |
 | GET | `/api/runs/jobs?status=&result_status=&limit=` | 列表 |
 
-### 批量 / 前向
+### 批量 / 前向（父作业，X5b）
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| POST | `/api/runs/batch` | 批量扫描（参数网格）→ `batch_id` |
-| GET | `/api/runs/batch/{id}` | 汇总 + Scorer 排序 |
-| POST | `/api/runs/walkforward` | 前向验证（窗口配置）→ `wf_id` |
-| GET | `/api/runs/walkforward/{id}` | 各窗口报告 |
+| POST | `/api/runs/parents` | 提交父计划（`kind = batch / walkforward`）→ `parent_job_id`；身份 = `plan_hash` |
+| GET | `/api/runs/parents/{id}` | 三值汇总 + 逐子状态 + 汇总明细 |
+
+**`POST /api/runs/parents` 请求形状**（`kind` 二选一，两个载荷同时出现 = `invalid_params`）：
+
+```json
+{
+  "idempotency_key": "…",
+  "kind": "batch",
+  "batch": {
+    "base_run_spec": { "…完整 RunSpec…": "…" },
+    "grid": { "lookback": [10, 20], "threshold": [0.1, 0.2] }
+  }
+}
+```
+
+```json
+{
+  "idempotency_key": "…",
+  "kind": "walkforward",
+  "walkforward": {
+    "base_run_spec": { "…完整 RunSpec…": "…" },
+    "windows": { "train_days": 60, "test_days": 20, "step_days": 20, "min_train_days": 30 },
+    "trading_days": ["2024-01-02", "2024-01-03", "…"]
+  }
+}
+```
+
+- `trading_days` **由调用方传入**（`YYYY-MM-DD`，严格递增）：本仓不自造交易日历，日历属 data 服务的只读 port（`dataflow.md`）；缺省 / 非法日期 → `invalid_params` 并点名到 `walkforward.trading_days[i]`。
+- 网格空 / 取值非标量 / 展开超过 100 / 窗口参数非法 / 区间不足 → `invalid_params`，报文点名字段（`grid`、`train_days`…）。
+- 响应：新建 **202**，幂等重放 **200**，体为
+  `{parent_job_id, kind, status, plan_hash, total, counts:{completed,invalid,failed,pending,settled}, idempotent_replay?}`。
+
+**`GET /api/runs/parents/{id}` 响应形状**：
+
+```json
+{
+  "parent_job_id": "…",
+  "kind": "batch",
+  "status": "running",
+  "plan_hash": "…64 hex…",
+  "total": 4,
+  "counts": { "completed": 1, "invalid": 1, "failed": 1, "pending": 1, "settled": 3 },
+  "children": [
+    { "run_id": "…", "status": "completed", "result_status": "invalid", "created_at": "…" },
+    { "run_id": "…", "status": "failed", "result_status": "failed", "error": "engine boom", "created_at": "…" }
+  ],
+  "summary": { "…Aggregate* 的明细…": "…" },
+  "created_at": "…",
+  "completed_at": null
+}
+```
+
+- 父 `status` 是生命周期（与 job 同六态），`children[].result_status` 才是 K9 结论；**父状态不塌缩**：`pending > 0` ⇒ `running`，任一子 `failed` ⇒ `failed`，`invalid` 不拖成 `failed`（`dataflow.md` §2 第 10 步）。
+- `children` 由 `JobQueue` 的可选能力 `ParentChildLister` 提供；实现不支持时返回空数组（不伪造状态）。顺序为 `created_at` 升序 → `run_id` 升序。
 
 ### 算力
 
@@ -64,10 +116,9 @@ verified-by: 施工 ⑦（裁-13 父表落地；batch / walkforward 的**对外�
 | `forbidden` | 403 | 有身份无权限（含非运维调 `drain`） | 不重试；找授权 |
 | `invalid_params` | 400 | 请求体 / 区间 / 窗口参数 / 未知枚举值 | 修请求，原样重试无意义 |
 | `missing_idempotency_key` | 400 | 提交类端点缺 `idempotency_key` | 补键重试；**不**由服务端代生成 |
-| `idempotency_conflict` | 409 | 同键 + 不同 `request_hash` | 换键或确认意图；**不得**静默复用旧 job |
+| `idempotency_conflict` | 409 | 同键 + 不同 `request_hash`（job）/ 不同 `plan_hash`（父作业） | 换键或确认意图；**不得**静默复用旧 job |
 | `job_not_found` | 404 | `GET`/`DELETE` 未知 run id | 不重试 |
-| `batch_not_found` | 404 | 未知 `batch_id` | 不重试 |
-| `walkforward_not_found` | 404 | 未知 `wf_id` | 不重试 |
+| `parent_not_found` | 404 | 未知 `parent_job_id`（batch / walkforward 共用） | 不重试 |
 | `worker_not_found` | 404 | `drain` 未知 worker | 不重试 |
 | `invalid_transition` | 409 | 对终态 job / worker 做非法迁移（如 terminal job 再 `Complete`、`offline` worker 再 drain） | 读当前状态再决定 |
 | `provenance_not_ready` | 409 | job 非终态，provenance 尚未写 | 退避轮询 |
@@ -87,8 +138,9 @@ verified-by: 施工 ⑦（裁-13 父表落地；batch / walkforward 的**对外�
 
 ## 3. 幂等性与重试
 
-- **提交类端点**（`POST /jobs`、`POST /batch`、`POST /walkforward`）**必须**带客户端提供的 `idempotency_key`；服务端**不派生**（见 §2 fail-closed ②）。
-- 同键 + 同 `request_hash` → 返回**原 id**（200，`idempotent_replay:true`）；同键 + 不同 `request_hash` → 409 `idempotency_conflict`。`request_hash = sha256(canonical request_json)`，canonical 规则随 RunSpec（QT-03）冻结，改规则 = MAJOR。
+- **提交类端点**（`POST /jobs`、`POST /parents`）**必须**带客户端提供的 `idempotency_key`；服务端**不派生**（见 §2 fail-closed ②）。
+- job：同键 + 同 `request_hash` → 返回**原 id**（200，`idempotent_replay:true`）；同键 + 不同 `request_hash` → 409 `idempotency_conflict`。`request_hash = sha256(canonical request_json)`，canonical 规则随 RunSpec（QT-03）冻结，改规则 = MAJOR。
+- 父作业：身份是 **`plan_hash = sha256(plan_canonical)`**，不是幂等键——**同一份计划（即使换了 `idempotency_key`）返回同一 `parent_job_id`**（200，`idempotent_replay:true`）；同键但计划不同 → 409 `idempotency_conflict`。数据库侧由 `parent_jobs(plan_hash)` 唯一索引兜底（`db-schema.md` §5）。
 - **取消幂等**：已取消再取消 → 同终态；`pending` 直接 `cancelled`，`running` 先 `cancelling` 再由 worker 确认。
 - **`drain` 幂等**：重复 drain → `nil`；`offline` 再 drain → `invalid_transition`。
 - **租约与重试**：`running` 的租约过期 → 回 `pending` 且 `attempts+1`；超过 `max_attempts` → `failed`（`attempts_exhausted`）。租约丢失的 worker **禁止**再写结果（`ErrLeaseLost`），否则两个 worker 会各写一份终态。

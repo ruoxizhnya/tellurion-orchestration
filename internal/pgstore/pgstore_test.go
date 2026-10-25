@@ -69,7 +69,7 @@ func TestMigrateIsIdempotentAndCreatesTheWholeSchema(t *testing.T) {
 		"backtest_jobs_worker_idx", "backtest_jobs_created_idx", "backtest_jobs_result_status_idx",
 		"backtest_jobs_parent_idx",
 		"batch_runs_idempotency_key_uidx", "walk_forward_reports_idempotency_key_uidx",
-		"parent_jobs_idempotency_key_uidx", "parent_jobs_kind_status_idx",
+		"parent_jobs_idempotency_key_uidx", "parent_jobs_plan_hash_uidx", "parent_jobs_kind_status_idx",
 	} {
 		var n int
 		if err := store.Pool().QueryRow(ctx,
@@ -378,6 +378,20 @@ func TestPGParentStoreRoundTrip(t *testing.T) {
 		t.Fatalf("replay id = %s, want %s", replayed.ID, created.ID)
 	}
 
+	// 换幂等键但同一份计划 → 仍是原父记录（身份是 plan_hash）。
+	replayedByPlan, ok, err := parents.EnqueueParent(ctx, &queue.ParentRecord{
+		IdempotencyKey: "parent-key-2",
+		Kind:           queue.ParentBatch,
+		PlanCanonical:  canonical,
+		Total:          2,
+	})
+	if err != nil || ok {
+		t.Fatalf("same plan under a new key: created=%v err=%v", ok, err)
+	}
+	if replayedByPlan.ID != created.ID {
+		t.Fatalf("same plan id = %s, want %s", replayedByPlan.ID, created.ID)
+	}
+
 	conflict := *rec
 	conflict.PlanCanonical = `{"kind":"batch","units":3,"children":[]}`
 	conflict.PlanHash = ""
@@ -413,5 +427,17 @@ func TestPGParentStoreRoundTrip(t *testing.T) {
 	}
 	if child.ParentJobID != created.ID {
 		t.Fatalf("child parent_job_id = %q, want %q", child.ParentJobID, created.ID)
+	}
+
+	// 逐子状态：ListChildren 只返回指向该父的行，空父返回空切片。
+	kids, err := q.ListChildren(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("ListChildren: %v", err)
+	}
+	if len(kids) != 1 || kids[0].ID != child.ID {
+		t.Fatalf("children = %+v, want [%s]", kids, child.ID)
+	}
+	if empty, err := q.ListChildren(ctx, "parent-with-no-children"); err != nil || len(empty) != 0 {
+		t.Fatalf("unknown parent children = %v / %v", empty, err)
 	}
 }

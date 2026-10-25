@@ -102,6 +102,7 @@ func TestDepsFieldsAreInterfaces(t *testing.T) {
 	ty := reflect.TypeOf(Deps{})
 	want := map[string]reflect.Type{
 		"Jobs":    reflect.TypeOf((*queue.JobQueue)(nil)).Elem(),
+		"Parents": reflect.TypeOf((*queue.ParentStore)(nil)).Elem(),
 		"Workers": reflect.TypeOf((*queue.WorkerRegistry)(nil)).Elem(),
 	}
 	for name, iface := range want {

@@ -17,6 +17,7 @@ type MemoryParents struct {
 	mu      sync.Mutex
 	parents map[string]*ParentRecord
 	byKey   map[string]string // idempotency_key → parent_job_id
+	byHash  map[string]string // plan_hash → parent_job_id（计划身份，跨键去重）
 	now     func() time.Time
 	newID   func() string
 }
@@ -33,6 +34,7 @@ func NewMemoryParents(opts ...MemoryOptions) *MemoryParents {
 	m := &MemoryParents{
 		parents: make(map[string]*ParentRecord),
 		byKey:   make(map[string]string),
+		byHash:  make(map[string]string),
 		now:     o.Now,
 		newID:   o.NewID,
 	}
@@ -89,8 +91,10 @@ func PrepareParent(rec *ParentRecord) (canonical, hash string, err error) {
 	return string(normalized), sum, nil
 }
 
-// EnqueueParent 幂等写入：同键同 plan_hash → 原行 + created=false；
-// 同键不同 hash → ErrIdempotencyConflict；同 id 重复 → ErrInvalidInput。
+// EnqueueParent 幂等写入。两条判据的次序是刻意的：
+//   - 先按幂等键判「同键不同计划」的冲突（调用方意图被改写，必须报错）；
+//   - 再按 plan_hash 判「同计划重复提交」——即使换了幂等键，同一份计划也只
+//     有一个父记录（X5b 的 plan_hash 幂等；身份是计划，不是调用方随手起的键）。
 func (m *MemoryParents) EnqueueParent(_ context.Context, rec *ParentRecord) (*ParentRecord, bool, error) {
 	canonical, hash, err := PrepareParent(rec)
 	if err != nil {
@@ -110,6 +114,9 @@ func (m *MemoryParents) EnqueueParent(_ context.Context, rec *ParentRecord) (*Pa
 		}
 		return ptrParent(existing.Clone()), false, nil
 	}
+	if id, ok := m.byHash[cp.PlanHash]; ok {
+		return ptrParent(m.parents[id].Clone()), false, nil
+	}
 	if cp.ID == "" {
 		cp.ID = m.newID()
 	}
@@ -123,6 +130,7 @@ func (m *MemoryParents) EnqueueParent(_ context.Context, rec *ParentRecord) (*Pa
 	}
 	m.parents[cp.ID] = &cp
 	m.byKey[cp.IdempotencyKey] = cp.ID
+	m.byHash[cp.PlanHash] = cp.ID
 	return ptrParent(cp.Clone()), true, nil
 }
 

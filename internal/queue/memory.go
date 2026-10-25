@@ -68,6 +68,7 @@ type Memory struct {
 var (
 	_ JobQueue            = (*Memory)(nil)
 	_ KernelAwareJobQueue = (*Memory)(nil)
+	_ ParentChildLister   = (*Memory)(nil)
 )
 
 // NewMemory 构造内存队列。opts 最多取第一个非零项。
@@ -522,6 +523,37 @@ func (m *Memory) List(ctx context.Context, filter ListFilter) ([]*RunRecord, err
 	if len(rows) > limit {
 		rows = rows[:limit]
 	}
+	out := make([]*RunRecord, 0, len(rows))
+	for i := range rows {
+		out = append(out, &rows[i])
+	}
+	return out, nil
+}
+
+// ListChildren 见 ParentChildLister 的契约注释。顺序按 created_at 升序、id 升序：
+// 子 run 通常是按计划顺序入队的，时间相同（测试固定时钟）时 id 兜底保证确定性。
+// 未知 parentID 返回空切片而不是 ErrParentNotFound——父记录是否存在由
+// ParentStore 判，本方法只回答「这张表里有没有指向它的行」。
+func (m *Memory) ListChildren(ctx context.Context, parentID string) ([]*RunRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	rows := make([]RunRecord, 0)
+	for _, r := range m.jobs {
+		if r.ParentJobID != parentID {
+			continue
+		}
+		rows = append(rows, r.Clone())
+	}
+	m.mu.Unlock()
+
+	sort.Slice(rows, func(i, j int) bool {
+		if !rows[i].CreatedAt.Equal(rows[j].CreatedAt) {
+			return rows[i].CreatedAt.Before(rows[j].CreatedAt)
+		}
+		return rows[i].ID < rows[j].ID
+	})
 	out := make([]*RunRecord, 0, len(rows))
 	for i := range rows {
 		out = append(out, &rows[i])

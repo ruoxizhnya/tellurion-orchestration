@@ -113,6 +113,7 @@ type Registry struct {
 var (
 	_ queue.JobQueue            = (*Queue)(nil)
 	_ queue.KernelAwareJobQueue = (*Queue)(nil)
+	_ queue.ParentChildLister   = (*Queue)(nil)
 	_ queue.WorkerRegistry      = (*Registry)(nil)
 	_ queue.WorkerReaper        = (*Registry)(nil)
 )

@@ -6,6 +6,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -44,6 +45,28 @@ func TestMemoryParents_ReplaysSameKeyAndPlan(t *testing.T) {
 	}
 	if second.ID != first.ID || second.PlanHash != first.PlanHash {
 		t.Fatalf("replay returned a different row: %+v vs %+v", second, first)
+	}
+}
+
+// TestMemoryParents_PlanHashIsTheIdentityAcrossKeys：X5b 的「同计划重复提交返回
+// 同一父 id」——换了幂等键也一样，身份是 plan_hash 而不是调用方起的键。
+func TestMemoryParents_PlanHashIsTheIdentityAcrossKeys(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemoryParents(MemoryOptions{NewID: func() string { return "parent-1" }})
+
+	first, created, err := m.EnqueueParent(ctx, testParent("key-1", `{"kind":"batch","units":2}`, 2))
+	if err != nil || !created {
+		t.Fatalf("first enqueue: created=%v err=%v", created, err)
+	}
+	second, created, err := m.EnqueueParent(ctx, testParent("key-2", `{"kind":"batch","units":2}`, 2))
+	if err != nil {
+		t.Fatalf("same plan under a new key: %v", err)
+	}
+	if created {
+		t.Fatal("same plan must not create a second parent")
+	}
+	if second.ID != first.ID || second.PlanHash != first.PlanHash {
+		t.Fatalf("same plan returned a different row: %+v vs %+v", second, first)
 	}
 }
 
@@ -124,6 +147,54 @@ func TestMemoryParents_SummaryRoundTrip(t *testing.T) {
 	}
 	if _, err := m.SaveParentSummary(ctx, "missing", ParentSummary{Status: RunRunning, Total: 3}); !errors.Is(err, ErrParentNotFound) {
 		t.Fatalf("unknown parent: err = %v, want ErrParentNotFound", err)
+	}
+}
+
+// TestMemoryListChildren：逐子状态的来源是 backtest_jobs（不是父表），顺序
+// created_at 升序 → id 升序；未知父返回空切片。
+func TestMemoryListChildren(t *testing.T) {
+	ctx := context.Background()
+	next := 0
+	q := NewMemory(MemoryOptions{
+		Now: func() time.Time { return time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC) },
+		NewID: func() string {
+			next++
+			return fmt.Sprintf("run-%02d", next)
+		},
+	})
+
+	for _, tc := range []struct {
+		key    string
+		parent string
+	}{
+		{"k1", "p-1"},
+		{"k2", "p-1"},
+		{"k3", "p-2"},
+		{"k4", ""},
+	} {
+		if _, _, err := q.Enqueue(ctx, &RunRecord{
+			IdempotencyKey: tc.key,
+			ParentJobID:    tc.parent,
+			RequestJSON:    []byte(`{"strategy":"momentum"}`),
+		}); err != nil {
+			t.Fatalf("enqueue %s: %v", tc.key, err)
+		}
+	}
+
+	kids, err := q.ListChildren(ctx, "p-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kids) != 2 || kids[0].ID != "run-01" || kids[1].ID != "run-02" {
+		t.Fatalf("children of p-1 = %+v", kids)
+	}
+
+	empty, err := q.ListChildren(ctx, "p-missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty == nil || len(empty) != 0 {
+		t.Fatalf("unknown parent must return an empty slice, got %#v", empty)
 	}
 }
 
