@@ -53,8 +53,8 @@ go test ./...
 
 | 依赖 | 版本 | 说明 |
 |---|---|---|
-| `github.com/ruoxizhnya/tellurion-contracts` | 未引入（最新 `v0.3.0`，2026-10-23 发版） | `RunSpec` / `ResultSpec` 只认契约 |
-| `github.com/ruoxizhnya/tellurion-kit` | 未引入（`v0.1.0` 已发版） | 日志 / HTTP / DB 连接 |
+| `github.com/ruoxizhnya/tellurion-contracts` | 未引入（远端最新 `v0.6.0`，2026-10-24 发版；2026-10-25 实测远端 tag 确为 `v0.6.0`） | `RunSpec` / `ResultSpec` 只认契约；实测本仓对 contracts 的 import = **0**（本仓零 import core，wire 面走 HTTP + 本地 DTO） |
+| `github.com/ruoxizhnya/tellurion-kit` | 未引入（远端最新 `v0.1.3`，2026-10-25 发版） | 日志 / HTTP / DB 连接 |
 | `github.com/jackc/pgx/v5` | `v5.7.3` | 2026-10-23 施工 ③ 登记。`internal/pgstore`（`run` schema 的 PG 实现：`JobQueue` / `WorkerRegistry` + `Migrate`）与 `cmd/orchestrationservice` 使用；版本与 core / kit / strategy / agent 对齐。**`internal/queue` 保持零第三方依赖**（port + DTO + 内存实现 + DDL 只用标准库），驱动只进 `pgstore` 一个包 |
 
 > 今日 `go.mod` 的**唯一直接依赖**是 `pgx v5.7.3`（其余是它的间接依赖）。上表前两项在真正引入前不动 `go.mod`。
