@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-25
-verified-by: 施工 ⑨（X0 三 hash 读面：`run_artifacts` 写入端口 + `GET /api/runs/{id}/provenance` + 父 GET 逐子三 hash；生产者仍是 core 引擎，未落）
+verified-by: 施工 ⑩（子 run 入队：`POST /api/runs/parents` 提交即写 `parent_job_id`，幂等键由父 id + 计划序号派生；部分失败靠重放补齐）
 ---
 
 # Dataflow — tellurion-orchestration
@@ -55,8 +55,9 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 9. `POST /api/runs/parents`（**施工 ⑧ 已落**；`kind = batch / walkforward`）→ 展开子 run + 父记录 `running`（每个子 run 一行 `backtest_jobs`，各自 provenance）；父报告只汇总计数与排序，不复制每个结果的内容。身份 = `plan_hash`：同计划（换幂等键也算）返回同一父 id（200 replay），同键换计划 → 409。
    - 请求形状：batch 传 `{base_run_spec, grid}`；walkforward 传 `{base_run_spec, windows, trading_days}`——**交易日历由调用方传入**（本仓不自造日历），缺 / 非法日期在 HTTP 层就 400 并点名 `walkforward.trading_days[i]`。
    - **规划已落（施工 ⑥，X5b）**：`internal/plan.ExpandBatch`（网格笛卡尔积，网格值浅合并进 `strategy_params`）、`internal/plan.ExpandWalkForward`（只生成完整窗口；train/test 只替换 `start_date` / `end_date`，其余 RunSpec 字段原样保留）。
-   - **父记录已落（施工 ⑦，裁-13）**：`internal/parents` 把展开结果折成 `plan_canonical` / `plan_hash`，提交即写 `run.parent_jobs`（`kind` + `total` + `running`）；**身份 = `plan_hash`**（施工 ⑧ 收紧）：同计划（换幂等键也算）→ 原行，同键不同计划 → 409。子 run 关系 = `backtest_jobs.parent_job_id`（**写入方未落**：子 run 入队仍是下一步）。
-10. 子 run 的 `result_status` 逐条可见：`completed` 才进排名 / 聚合；`invalid` / `failed` 显式计数，不静默丢弃。所有窗口失败 → 父 `failed`，不是"成功的空报告"。`GET /api/runs/parents/{id}` 返回三值计数 + `children[]`（每行 `status` 与 K9 `result_status`，`ParentChildLister` 按 `parent_job_id` 读取；**施工 ⑨ 起逐子带三 hash**——`run_spec_hash` 恒有（来自 job 行的 `request_hash`），`dataset_snapshot_hash` / `artifact_hash` 仅在有 `run_artifacts` 行时出现，缺失不制造第二个完整性判据）；父状态不塌缩：`pending > 0` ⇒ `running`，任一子 `failed` ⇒ `failed`，`invalid` 不拖成 `failed`。
+   - **父记录已落（施工 ⑦，裁-13）**：`internal/parents` 把展开结果折成 `plan_canonical` / `plan_hash`，提交即写 `run.parent_jobs`（`kind` + `total` + `running`）；**身份 = `plan_hash`**（施工 ⑧ 收紧）：同计划（换幂等键也算）→ 原行，同键不同计划 → 409。子 run 关系 = `backtest_jobs.parent_job_id`。
+   - **子 run 已入队（施工 ⑩）**：`internal/parents` 在父行落库后逐条 `JobQueue.Enqueue`，写 `parent_job_id`（这一列的唯一写入方）。幂等键 = `parent:<parent_job_id>:<child_index>`（stable；改规则 = MAJOR）；同一份计划重放（哪怕换幂等键）派生出同一批键，因此「父行已写、子 run 没入完」可以靠重放同一 POST 幂等补齐，不需要跨两张表的事务。子 run 的 `created_at` 按计划序号递增 1µs，保证 `children[]` 的顺序与计划一致（排序键是 `created_at` → `id`）。
+10. 子 run 的 `result_status` 逐条可见：`completed` 才进排名 / 聚合；`invalid` / `failed` 显式计数，不静默丢弃。所有窗口失败 → 父 `failed`，不是"成功的空报告"。`GET /api/runs/parents/{id}` 返回三值计数 + `children[]`（每行 `status` 与 K9 `result_status`，`ParentChildLister` 按 `parent_job_id` 读取；**施工 ⑩ 起 `children[]` 就是提交时入队的那批子 run**，逐子带三 hash——`run_spec_hash` 恒有（来自 job 行的 `request_hash`），`dataset_snapshot_hash` / `artifact_hash` 仅在有 `run_artifacts` 行时出现，缺失不制造第二个完整性判据）；父状态不塌缩：`pending > 0` ⇒ `running`，任一子 `failed` ⇒ `failed`，`invalid` 不拖成 `failed`。
    - **汇总已落（施工 ⑥；施工 ⑦ 接上落库）**：`AggregateBatch`（必须传计划总数 `plannedTotal`，与逐条回报数不符即拒——漏报不会被当成完成；只对 `completed` 且给出有限 score 的子 run 排名，同分按 `run_id` 升序；`invalid` / `failed` 保留但 `rank=0`）与 `AggregateWalkForward`（单段失败 = 整窗失败；缺段 / 缺窗算 pending）。父状态三条：还有未回报 → `running`；任一 `failed` → `failed`；否则 `completed`（`invalid` 不拖成 `failed`）。评分由执行侧给，本仓不解析结果内容。`internal/parents.ApplyBatchSummary` / `ApplyWalkForwardSummary` 把同一份汇总写回 `parent_jobs` 的三值计数与 `status`（终态同时写 `completed_at`）。
 
 ## 3. 失败模式（每一处 fail-closed 都要能指名）
@@ -72,6 +73,7 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 | 三 hash 缺失（终态） | 结果不可追溯 | 终态 `completed` / `invalid` 必须有 `run_artifacts` 行，否则 `provenance_missing` |
 | batch / wf 部分失败 | 汇总看起来"完成" | 三值计数逐条可见；父 `status` 不吞子失败；`GET /parents/{id}` 的 `children[]` 给出逐子结论 |
 | 同计划重复提交 | 同一批活被提交两次 | 身份 = `plan_hash`（唯一索引 + `EnqueueParent` 先查），返回原父 id（200 replay）；同键换计划 → 409 |
+| 父行已写、子 run 入队中途失败 | 父记录 `running`，但子 run 只有一部分 | 重放同一 POST：父按 `plan_hash` 返回原行，子按派生键逐条幂等补齐（`parent:<parent_job_id>:<child_index>`）；不产生重复行。**不**用跨表事务 |
 | 编排层重启 | 队列丢 | 状态在 DB，不在内存；租约 + 重试幂等 |
 | 结果内容写进 `run` | 边界腐化 | 只存 `result_uri` 指针；结果内容归 core / artifact 服务 |
 
@@ -87,6 +89,7 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 8. 父记录（batch / wf）的 `status` 不是 K9：它是生命周期；子 run 的结论只看各自的 `result_status`。
 9. 同一 `plan_hash` 只有一个父记录：**同计划（即使换了幂等键）返回同一 `parent_job_id`**；`parent_jobs(plan_hash)` 唯一索引是这条不变量的数据库兜底。
 10. 同一 `run_id` 只有一行 `run_artifacts`：同身份重写是**幂等**（返回原行、不刷 `created_at`），身份漂移是**响亮的冲突**（`ErrArtifactConflict`），**不覆盖**。PG 侧靠 `ON CONFLICT (run_id) DO UPDATE … WHERE <13 项身份全等>` 的 0 行受影响兜底（不能写 `DO NOTHING`——那会把冲突读成成功）。
+11. 子 run 的幂等键由**父记录 id + 计划序号**派生（`parent:<parent_job_id>:<child_index>`，stable；改规则 = MAJOR）。同一份计划（= 同一个父 id）无论重放多少次都派生出同一批键，因此子 run 不重复、部分失败可续。
 
 ## 5. 与契约文档的关系
 

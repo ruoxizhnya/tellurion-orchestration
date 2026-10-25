@@ -1,14 +1,14 @@
 ---
 status: active
 last-verified: 2026-10-25
-verified-by: 施工 ⑨（X0 `GET /api/runs/{id}/provenance` 独立 DTO 落地：`result_status` 只从 `backtest_jobs` 取、三态错误、可空列显式 null；`children[]` 逐子带三 hash）
+verified-by: 施工 ⑩（父作业提交即入队子 run：`parent_job_id` 的写入方落 `internal/parents`；子 run 幂等键 = `parent:<parent_job_id>:<child_index>`，stable）
 ---
 
 # API Schema — tellurion-orchestration
 
 > **实现状态（2026-10-24，施工 ③/⑥）**：`internal/queue` 已落 `JobQueue` / `WorkerRegistry` 两个 **Go port** + 内存实现 + `run` schema DDL **并已接 PG**（X5a/X5c + 施工 ③）：PG 实现在 `internal/pgstore`，与内存实现跑**同一套**语义用例（`internal/qtest`，每个实现 45 条 = 队列 30 + 注册表 9 + 跨 port 6），启动迁移在 `cmd/orchestrationservice`。`internal/httpapi` 已落**任务 4 端点**（`POST`/`GET list`/`GET {id}`/`DELETE {id}`，§1「任务」表）——端点行为按 §2 的错误码与幂等语义实现，哨兵 → wire code 的映射在 `internal/httpapi/api.go` 的 `classify`。**仍未实现**：worker / provenance 端点（X5c / X0）；鉴权（R5 未裁，`unauthenticated` / `forbidden` 暂不产生）。
 > **X5b 父表（2026-10-25 施工 ⑦，裁-13）**：`run.parent_jobs` 与 `run.backtest_jobs.parent_job_id` 已落（内存 + PG 两个 `ParentStore` 实现），`internal/parents` 提供提交（写父表）与汇总（复用 `internal/plan` 写回三值计数）的服务层入口。
-> **X5b 父作业端点（2026-10-25 施工 ⑧）**：`POST /api/runs/parents` 与 `GET /api/runs/parents/{id}` 已实现（`internal/httpapi/parents.go`）——batch / walkforward 共用一套父记录与身份（`plan_hash`），原「每类父各 POST + GET」的 4 个目标端点**不再作为目标契约**（从未实现，无调用方）。子 run 入队与 worker 执行仍未落。
+> **X5b 父作业端点（2026-10-25 施工 ⑧）**：`POST /api/runs/parents` 与 `GET /api/runs/parents/{id}` 已实现（`internal/httpapi/parents.go`）——batch / walkforward 共用一套父记录与身份（`plan_hash`），原「每类父各 POST + GET」的 4 个目标端点**不再作为目标契约**（从未实现，无调用方）。**子 run 入队已落（施工 ⑩）**：提交即写 `parent_job_id`；worker 执行仍未落。
 > 本文件是**目标契约**，不是现状说明书；开工顺序见 `docs/TASKS.md` 的「施工序」。
 > **请求 / 响应形状、状态机、幂等键与 `run` schema 的目标键**见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9（M8 接口对表）。本文件只钉**对外行为**（方法、路径、错误码、幂等），不重复字段表。
 
@@ -60,6 +60,7 @@ verified-by: 施工 ⑨（X0 `GET /api/runs/{id}/provenance` 独立 DTO 落地�
 ```
 
 - `trading_days` **由调用方传入**（`YYYY-MM-DD`，严格递增）：本仓不自造交易日历，日历属 data 服务的只读 port（`dataflow.md`）；缺省 / 非法日期 → `invalid_params` 并点名到 `walkforward.trading_days[i]`。
+- **提交即入队（施工 ⑩）**：父记录落库后，逐条把子 run 写进 `run.backtest_jobs` 并填 `parent_job_id`（batch = 每个网格点一条；walkforward = 每窗 `train` / `test` 各一条）。子 run 幂等键 = `parent:<parent_job_id>:<child_index>`（**stable**；改规则 = MAJOR），同一份计划重放（哪怕换幂等键）派生出同一批键。父记录与子 run 不在一个事务里：子 run 入队中途失败（如 429 `queue_full`）时父记录保留，**重放同一请求**按幂等键补齐即可，不会产生重复子 run。
 - 网格空 / 取值非标量 / 展开超过 100 / 窗口参数非法 / 区间不足 → `invalid_params`，报文点名字段（`grid`、`train_days`…）。
 - 响应：新建 **202**，幂等重放 **200**，体为
   `{parent_job_id, kind, status, plan_hash, total, counts:{completed,invalid,failed,pending,settled}, idempotent_replay?}`。
@@ -85,7 +86,7 @@ verified-by: 施工 ⑨（X0 `GET /api/runs/{id}/provenance` 独立 DTO 落地�
 ```
 
 - 父 `status` 是生命周期（与 job 同六态），`children[].result_status` 才是 K9 结论；**父状态不塌缩**：`pending > 0` ⇒ `running`，任一子 `failed` ⇒ `failed`，`invalid` 不拖成 `failed`（`dataflow.md` §2 第 10 步）。
-- `children` 由 `JobQueue` 的可选能力 `ParentChildLister` 提供；实现不支持时返回空数组（不伪造状态）。顺序为 `created_at` 升序 → `run_id` 升序。
+- `children` 由 `JobQueue` 的可选能力 `ParentChildLister` 提供；实现不支持时返回空数组（不伪造状态）。顺序为 `created_at` 升序 → `run_id` 升序。**施工 ⑩ 起 `children` 就是提交时入队的那批子 run**（batch = 网格点数；walkforward = 窗口数 × 2），不再通常为空。
 - `children[]` 的三 hash（X0）：`run_spec_hash` 取自 `backtest_jobs.request_hash`，任何子 run 都有；`dataset_snapshot_hash` / `artifact_hash` 取自 `run_artifacts`，**只有留痕已写入时才有**（未跑完 / 从未产出的子省略这两个键，不伪造空值）。完整性判据仍由 `/provenance` 的 `provenance_missing` 报，父列表不制造第二个判据。
 
 ### 算力
@@ -153,7 +154,7 @@ verified-by: 施工 ⑨（X0 `GET /api/runs/{id}/provenance` 独立 DTO 落地�
 | `provenance_not_ready` | 409 | job 非终态，provenance 尚未写 | 退避轮询 |
 | `provenance_not_found` | 404 | job 终态 `failed` / `cancelled` 且从未写 provenance（如路由拒绝 / 从未跑到写留痕那一步） | 读 job 的 `error`；不重试读取 |
 | `provenance_missing` | 500 | 终态为 `completed` / `invalid` 却查不到 `run_artifacts`（数据完整性破坏） | 告警；**不得**当成功使用 |
-| `queue_full` | 429 | 待领取深度达上限 | 退避重试，**不 silently 丢弃** |
+| `queue_full` | 429 | 待领取深度达上限（含父作业逐条入队子 run 时） | 退避重试；父记录保留，重放同一请求按幂等键补齐；**不 silently 丢弃** |
 
 **非错误语义**：同幂等键重复提交 → **200 + 原 `job_id` + `idempotent_replay:true`**（视为成功，不重复跑）；取消 `running` → **202 + `cancelling`**（轮询确认终态）；取消 `pending` → **200 + `cancelled`**；取消终态 → 200 原状态（幂等）。
 
@@ -161,7 +162,7 @@ verified-by: 施工 ⑨（X0 `GET /api/runs/{id}/provenance` 独立 DTO 落地�
 
 **fail-closed 四条**：
 1. **未注册内核 / 未登记 market** → 提交期拒绝（`invalid_params`），job 行都不落（`EngineRegistry` / `MarketRouter` 的现有语义，零静默回退）。
-2. **幂等键缺失** → 拒绝；服务端**不**从请求内容派生键（派生会把两个不同意图静默合并）。
+2. **幂等键缺失** → 拒绝；服务端**不**从请求内容派生**调用方提交的**幂等键（派生会把两个不同意图静默合并）。子 run 的键是另一回事：由父记录 id + 计划序号派生（施工 ⑩，见 §3）。
 3. **`request_hash` 算不出**（canonical 编码失败）→ 拒绝。
 4. **三 hash 不是入队门槛**：它们是 run 开始后才算出的**产物**（QT-63）。入队只校验三份引用可解析；终态 `result_status ∈ {completed, invalid}` 必须能在 `/provenance` 取到三 hash，取不到 → `provenance_missing`（数据完整性，不是正常路径）。
 
@@ -170,6 +171,7 @@ verified-by: 施工 ⑨（X0 `GET /api/runs/{id}/provenance` 独立 DTO 落地�
 - **提交类端点**（`POST /jobs`、`POST /parents`）**必须**带客户端提供的 `idempotency_key`；服务端**不派生**（见 §2 fail-closed ②）。
 - job：同键 + 同 `request_hash` → 返回**原 id**（200，`idempotent_replay:true`）；同键 + 不同 `request_hash` → 409 `idempotency_conflict`。`request_hash = sha256(canonical request_json)`，canonical 规则随 RunSpec（QT-03）冻结，改规则 = MAJOR。
 - 父作业：身份是 **`plan_hash = sha256(plan_canonical)`**，不是幂等键——**同一份计划（即使换了 `idempotency_key`）返回同一 `parent_job_id`**（200，`idempotent_replay:true`）；同键但计划不同 → 409 `idempotency_conflict`。数据库侧由 `parent_jobs(plan_hash)` 唯一索引兜底（`db-schema.md` §5）。
+- 子 run（施工 ⑩）：幂等键 = `parent:<parent_job_id>:<child_index>`（**stable**；改规则 = MAJOR）。同一计划重放派生出同一批键，因此「父行已写、子 run 未入完」可以靠重放同一 POST 补齐：父行按 `plan_hash` 返回原行，子 run 按键逐条命中原行。入队中途遇 429 `queue_full` 时**父记录不回滚**（两步没有跨表事务），调用方退避后重放即可。
 - **取消幂等**：已取消再取消 → 同终态；`pending` 直接 `cancelled`，`running` 先 `cancelling` 再由 worker 确认。
 - **`drain` 幂等**：重复 drain → `nil`；`offline` 再 drain → `invalid_transition`。
 - **租约与重试**：`running` 的租约过期 → 回 `pending` 且 `attempts+1`；超过 `max_attempts` → `failed`（`attempts_exhausted`）。租约丢失的 worker **禁止**再写结果（`ErrLeaseLost`），否则两个 worker 会各写一份终态。

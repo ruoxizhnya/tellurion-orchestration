@@ -70,7 +70,7 @@ tellurion-orchestration ──► core 引擎（派活）
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | X5a | job 队列 + 状态机 + 幂等 | ✅ 内存 + PG 两个实现 + jobs 4 端点（施工 ②③④）；R8/R9 已落，见 §9.8 |
-| X5b | batch + walkforward | 🔶 规划与汇总纯函数已落（施工 ⑥）；**父表 `parent_jobs` + `backtest_jobs.parent_job_id` 已落（施工 ⑦，裁-13）**，提交写父表 + 汇总写回已接 `internal/parents`；**父作业 HTTP 2 端点已落（施工 ⑧）**；子 run 入队、worker 执行未落 |
+| X5b | batch + walkforward | 🔶 规划与汇总纯函数已落（施工 ⑥）；**父表 `parent_jobs` + `backtest_jobs.parent_job_id` 已落（施工 ⑦，裁-13）**，提交写父表 + 汇总写回已接 `internal/parents`；**父作业 HTTP 2 端点已落（施工 ⑧）**；**子 run 入队已落（施工 ⑩，`parent_job_id` 的唯一写入方）**；worker 执行未落 |
 | X5c | worker 注册 / 心跳 / drain / 心跳超时 | 🔶 注册 / 心跳 / drain / 心跳超时 → `offline` 已落（内存 + PG，施工 ⑤）；worker 进程本身未做（派活契约未定），见 §9.8 |
 | X0 | 三 hash 留痕（`run_artifacts`） | 🔶 端口 + 内存 / PG 两个实现 + `GET /api/runs/{id}/provenance` 已落（施工 ⑨）；父 GET 的 `children[]` 带三 hash。**生产者（worker 进程）未落**——本仓没有引擎 |
 
@@ -195,7 +195,7 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | `GET /api/runs/jobs/{id}` | `{job_id, status, result_status, error, result_uri, run_spec_hash, created_at, started_at, completed_at}` | `unauthenticated` / `forbidden` / `job_not_found` | 只读 | 加字段 = MINOR |
 | `DELETE /api/runs/jobs/{id}` | → 202 `{job_id, status:"cancelling"}`；`pending` 直接 200 `{status:"cancelled"}`；终态 → 200 原状态 | `unauthenticated` / `forbidden` / `job_not_found` | 幂等（重复取消返回同终态） | 语义变更 = MAJOR（旧 `CancelJob` 对 pending 删行） |
 | `GET /api/runs/jobs?status=&result_status=&limit=` | → `{jobs:[…], total}` | `unauthenticated` / `forbidden` / `invalid_params` | 只读 | 加过滤 = MINOR |
-| `POST /api/runs/parents` | `{idempotency_key, kind, batch?/walkforward?}` → 202 `{parent_job_id, kind, status:"running", plan_hash, total, counts}`；幂等重放 → 200 + `idempotent_replay:true` | `unauthenticated` / `forbidden` / `invalid_params`（网格空/超上限/窗口参数/日期）/ `missing_idempotency_key` / `idempotency_conflict` | **身份 = `plan_hash`**：同计划（换键也算）返回同一父 id；同键换计划 = 409 | 新端点 = MINOR（取代未实现的 batch/wf 4 端点） |
+| `POST /api/runs/parents` | `{idempotency_key, kind, batch?/walkforward?}` → 202 `{parent_job_id, kind, status:"running", plan_hash, total, counts}`；幂等重放 → 200 + `idempotent_replay:true`。**提交即入队子 run**（`parent_job_id` 写入方，施工 ⑩） | `unauthenticated` / `forbidden` / `invalid_params`（网格空/超上限/窗口参数/日期）/ `missing_idempotency_key` / `idempotency_conflict` / `queue_full`（子 run 入队中途满） | **身份 = `plan_hash`**：同计划（换键也算）返回同一父 id；同键换计划 = 409；子 run 键 = `parent:<parent_job_id>:<child_index>` | 新端点 = MINOR（取代未实现的 batch/wf 4 端点） |
 | `GET /api/runs/parents/{id}` | → `{parent_job_id, kind, status, plan_hash, total, counts:{completed,invalid,failed,pending,settled}, children:[{run_id,status,result_status,error,run_spec_hash,dataset_snapshot_hash?,artifact_hash?,created_at}], summary, created_at, completed_at}` | `unauthenticated` / `forbidden` / `parent_not_found` | 只读；`children` 来自可选能力 `ParentChildLister`（不支持时为空数组）；三 hash 来自 `run_artifacts`（未写入则省略后两个） | 加字段 = MINOR |
 | `GET /api/runs/workers` | → `{workers:[WorkerRecord]}` | `unauthenticated` / `forbidden` | 只读 | 新端点 = MINOR |
 | `POST /api/runs/workers/{id}/drain` | → 200 `{worker_id, status:"draining"}` | `unauthenticated` / `forbidden` / `worker_not_found` / `invalid_transition` | 幂等 | 新端点 = MINOR |
@@ -276,7 +276,7 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | `BacktestRequest` / `BacktestResponse` | frozen | 本单不改；要加 per-run seed / params / 三 hash 返回字段 → 走 SPEC 冻结面评审（QT-03 ③-⑥） |
 | `run` schema 列 | stable | 加列 = MINOR（expand-contract）；删列 / 改类型 / 改主键 = MAJOR + ADR |
 | `run_artifacts` 三 hash + pointer | 🔒 frozen | 增列 / 改口径 / 改 hash 算法 = 评审；历史 hash 不可回填 |
-| 幂等键派生 | stable | 改派生规则 = MAJOR（同请求会被当新 run 重跑） |
+| 幂等键派生 | stable | 改派生规则 = MAJOR（同请求会被当新 run 重跑）。**子 run 规则（施工 ⑩）**：`parent:<parent_job_id>:<child_index>`，由 `internal/parents.ChildIdempotencyKey` 唯一实现；`parent:` 为保留前缀 |
 | HTTP 端点 | stable | 只增不删；`DELETE` 从「删行」改「取消保留」= MAJOR，必须给旧消费方切换窗口（R1） |
 
 ### 9.7 R 组 · 待裁事项（不落地不阻塞对表，但阻塞实现）
@@ -318,8 +318,17 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | 文件 | 内容 | 对应 |
 |---|---|---|
 | `internal/plan/parent.go` | `BuildBatchPlan` / `BuildWalkForwardPlan`（复用 `Expand*`）+ `ParentPlan.Canonical/Hash`（`plan_canonical` 的稳定字节与 sha256）+ `PendingCounts` | §9.5 `parent_jobs` |
-| `internal/parents/service.go` | `SubmitBatch` / `SubmitWalkForward`（提交即写父表）+ `ApplyBatchSummary` / `ApplyWalkForwardSummary`（复用 `Aggregate*` 写回三值计数与父状态） | 裁-13 |
+| `internal/parents/service.go` | `SubmitBatch` / `SubmitWalkForward`（提交即写父表 + **逐条入队子 run 并写 `parent_job_id`**，施工 ⑩；子 run 幂等键 `ChildIdempotencyKey` = `parent:<parent_job_id>:<child_index>`；父行与子 run 非同一事务，部分失败靠重放幂等补齐）+ `ApplyBatchSummary` / `ApplyWalkForwardSummary`（复用 `Aggregate*` 写回三值计数与父状态） | 裁-13、施工 ⑩ |
 | `internal/plansuite/suite.go` | 共享套件新增 `ParentPlanIdentityIsDeterministic`：两种父同跑——canonical 逐字节稳定、hash 一致、Units×UnitSize=子 run 数、子计划与 `Plan` 同源 | X5b 验收 |
+
+**施工 ⑩：子 run 入队（`parent_job_id` 的写入方）**
+
+| 面 | 形状 | 对应 |
+|---|---|---|
+| 写入点 | `internal/parents.Service.submit`：`EnqueueParent` 成功后调用 `enqueueChildren`，逐条 `JobQueue.Enqueue`，`RunRecord.ParentJobID = parent.ID` | 裁-13 的子 run 关系 |
+| 幂等键 | `parents.ChildIdempotencyKey(parentID, childIndex)` = `parent:<parent_job_id>:<child_index>`；同一计划（同父 id）重放派生同一批键 | §9.6「幂等键派生」 |
+| 顺序 | 子 run `created_at` = 提交时刻 + 计划序号 × 1µs（PG 精度微秒）；`ListChildren` 的排序键 `created_at → id` 因此恢复计划顺序 | `api-schema.md` §1 `children` |
+| 失败口径 | 父行与子 run 不在一个事务里：入队中途失败（如 `queue_full`）父行保留、返回错误；重放同一 POST 按幂等键补齐，不重复 | `dataflow.md` §3 |
 
 **落地包（`internal/httpapi`，施工 ②）**
 
@@ -398,13 +407,13 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 
 | 面 | 已落口径 | 未落 |
 |---|---|---|
-| batch 网格 | 参数名按字典序、最后一个参数变化最快；展开是**笛卡尔积**，每个点生成完整 RunSpec（`strategy_params` 浅合并，网格值覆盖同名 base 值，其余字段一字不改）；空网格 / 空取值 / 非标量 / 尾随内容 / 超过 100 个任务 → `invalid_params` | `/api/runs/batch` 端点、子 run 入队 |
-| walkforward 窗口 | 交易日必须严格递增；只生成**完整**窗口（train/test 各按交易日数），`step_days` 必须为正；train/test 首尾相接不重叠；`min_train_days` 空 = `train_days/2`（固定窗口下恒成立）；不足一个完整窗口 / 日历违约 → `invalid_params` | 直连 data 服务的 `TradingCalendar` 只读 port（本层只收日历切片）、`/api/runs/walkforward` 端点 |
-| 子 run 派生 | walkforward 每窗两条（train / test），只替换 `start_date` / `end_date`；kernel / fill_timing / seed / strategy_params / strategy_ref 原样保留（共享套件逐字段断言） | 子 run 入队与幂等键生成（关系列已落：`backtest_jobs.parent_job_id`） |
+| batch 网格 | 参数名按字典序、最后一个参数变化最快；展开是**笛卡尔积**，每个点生成完整 RunSpec（`strategy_params` 浅合并，网格值覆盖同名 base 值，其余字段一字不改）；空网格 / 空取值 / 非标量 / 尾随内容 / 超过 100 个任务 → `invalid_params` | —（子 run 入队已落施工 ⑩；原 `/api/runs/batch` 4 端点不再作为目标，统一走 `POST /api/runs/parents`） |
+| walkforward 窗口 | 交易日必须严格递增；只生成**完整**窗口（train/test 各按交易日数），`step_days` 必须为正；train/test 首尾相接不重叠；`min_train_days` 空 = `train_days/2`（固定窗口下恒成立）；不足一个完整窗口 / 日历违约 → `invalid_params` | 自取交易日历（本层只收调用方给的切片；core QT-67 的只读端点可作来源）、`/api/runs/walkforward` 端点（统一走 `POST /api/runs/parents`） |
+| 子 run 派生 | walkforward 每窗两条（train / test），只替换 `start_date` / `end_date`；kernel / fill_timing / seed / strategy_params / strategy_ref 原样保留（共享套件逐字段断言） | —（施工 ⑩：入队写 `parent_job_id`，键 = `parent:<parent_job_id>:<child_index>`） |
 | 汇总 | 三值分开计数（`completed` / `invalid` / `failed`）+ `pending`；batch 必须传计划总数且与逐条回报数一致（漏报即拒），walkforward 缺段 / 缺窗算 pending；只对 `completed` 且给出有限 score 的子 run 排名（同分按 `run_id` 升序），`invalid` / `failed` 保留但 `rank=0`；walkforward 单段失败 = 整窗失败；父状态：还有未回报 → `running`，任一 failed → `failed`（**不吞**子失败），否则 `completed` | 结果内容解析 / 指标均值（本仓不碰结果内容；score 由执行侧给） |
 
-**裁-13 落地（施工 ⑦）**：父记录不再等 R6——建 **一张** `run.parent_jobs`，子 run 用 `backtest_jobs.parent_job_id`（列 + 索引）归属父计划；`internal/parents` 的 `SubmitBatch` / `SubmitWalkForward` 提交即写父表，`ApplyBatchSummary` / `ApplyWalkForwardSummary` 复用 `internal/plan` 的汇总写回三值计数。`batch_runs` / `walk_forward_reports` 停写、保留为迁移期旧表。**仍未落**：batch / walkforward 的 4 个 HTTP 端点、子 run 入队、worker 执行。
+**裁-13 落地（施工 ⑦）**：父记录不再等 R6——建 **一张** `run.parent_jobs`，子 run 用 `backtest_jobs.parent_job_id`（列 + 索引）归属父计划；`internal/parents` 的 `SubmitBatch` / `SubmitWalkForward` 提交即写父表，`ApplyBatchSummary` / `ApplyWalkForwardSummary` 复用 `internal/plan` 的汇总写回三值计数。`batch_runs` / `walk_forward_reports` 停写、保留为迁移期旧表。**施工 ⑩ 已补**：提交后逐条入队子 run 并写 `parent_job_id`。**仍未落**：worker 执行。
 
 **X0 落地（施工 ⑨）**：`run_artifacts` 的读写门是**可选接口** `ArtifactStore`（§9.6「新接口 = MINOR」，`JobQueue` 的 10 方法一个字没动），内存 + PG 各一个实现，`cmd` 用 `store.Artifacts()` 装配并开 `WithArtifacts`。三条口径写死在两个实现共用处：① 未知 run 拒写（PG 是 FK 23503、内存显式查 `Memory.Get`——同一段代码换实现不能换行为）；② 同身份重写幂等、**不刷 `created_at`**；③ 同 run_id 身份漂移 → `ErrArtifactConflict`，**不覆盖**（三 hash 是坐标，覆盖等于把两次 run 的留痕并成一次）。读面 `GET /api/runs/{id}/provenance` 只做 `run_artifacts ⋈ backtest_jobs`：hash / 指针 / 生效值来自留痕表，**`result_status` 只从 `backtest_jobs` 取**；没有留痕时按两轴分三态（非终态 409 / 终态 failed·cancelled 404 / 终态 completed·invalid 500）。父 GET 的 `children[]` 逐子补三 hash（`run_spec_hash` 来自行的 `request_hash`，另两个来自留痕；未写入就省略，不伪造）。**仍未落**：生产者——写留痕的是 worker 进程，本仓没有引擎（同 `ClaimByKernel` 的处境）；鉴权 R5 仍未裁。
 
-**自检结论**（施工 ⑨ 后）：队列的语义面与 durable 面已落地（内存 + PG 同一套 qtest，45 条/实现）；`internal/plan` 把 X5b 的**规划与汇总**做成了纯函数，`internal/plansuite` 的 8 条共享用例同跑两种父；父记录的身份 / 提交 / 汇总已落 `internal/parents` + 两个 `ParentStore` 实现；X0 的 `run_artifacts` 读写与 `/provenance` 已落两个实现 + HTTP。**仍未完成**：batch/walkforward 的 4 端点、子 run 入队、worker 领取执行的装配（本仓没有引擎，故 `ClaimByKernel` 与 `ArtifactStore.SaveArtifact` 目前都没有生产消费方）、worker 端点、鉴权（R5）、以及 `pkg/backtest` 侧的迁移（属 core，见 `docs/TASKS.md` 验收对照）。判据是「队列可运行、父计划可提交 / 可汇总落库、三 hash 可从 HTTP 读出，但还不能自己跑子 run」。
+**自检结论**（施工 ⑩ 后）：队列的语义面与 durable 面已落地（内存 + PG 同一套 qtest，45 条/实现）；`internal/plan` 把 X5b 的**规划与汇总**做成了纯函数，`internal/plansuite` 的 8 条共享用例同跑两种父；父记录的身份 / 提交 / 汇总已落 `internal/parents` + 两个 `ParentStore` 实现；**子 run 入队已落（施工 ⑩）——提交一次就写出父记录 + 全部子 run（`parent_job_id`），`GET /parents/{id}` 的 `children[]` 不再是空数组**；X0 的 `run_artifacts` 读写与 `/provenance` 已落两个实现 + HTTP。**仍未完成**：worker 领取执行的装配（本仓没有引擎，故 `ClaimByKernel` 与 `ArtifactStore.SaveArtifact` 目前都没有生产消费方）、worker 端点、鉴权（R5）、以及 `pkg/backtest` 侧的迁移（属 core，见 `docs/TASKS.md` 验收对照）。判据是「队列可运行、父计划可提交 / 可入队 / 可汇总落库、三 hash 可从 HTTP 读出，但还不能自己跑子 run」。

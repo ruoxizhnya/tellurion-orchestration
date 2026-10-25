@@ -48,7 +48,7 @@ func decodeParentSubmit(t *testing.T, body string) parentSubmitBody {
 }
 
 func TestSubmitParent_BatchPlanHashIsTheIdentity(t *testing.T) {
-	s, _, _ := newParentServer(t)
+	s, jobs, _ := newParentServer(t)
 
 	code, resp := do(t, s, "POST", "/api/runs/parents", batchParentBody("key-1"))
 	if code != http.StatusAccepted {
@@ -66,6 +66,10 @@ func TestSubmitParent_BatchPlanHashIsTheIdentity(t *testing.T) {
 	}
 	if first.IdempotentReplay {
 		t.Fatal("first submit must not be marked as a replay")
+	}
+	// 提交即入队：4 个网格点各一行 `backtest_jobs`，全部指向该父记录。
+	if kids, err := jobs.ListChildren(t.Context(), first.ParentJobID); err != nil || len(kids) != 4 {
+		t.Fatalf("children after submit = %d / %v, want 4", len(kids), err)
 	}
 
 	// 同键同计划 → 200 重放原行。
@@ -86,6 +90,10 @@ func TestSubmitParent_BatchPlanHashIsTheIdentity(t *testing.T) {
 	byPlan := decodeParentSubmit(t, resp)
 	if !byPlan.IdempotentReplay || byPlan.ParentJobID != first.ParentJobID {
 		t.Fatalf("same plan with a new key must return the original parent: %s", resp)
+	}
+	// 重放不得重复入队。
+	if kids, err := jobs.ListChildren(t.Context(), first.ParentJobID); err != nil || len(kids) != 4 {
+		t.Fatalf("children after replays = %d / %v, want 4", len(kids), err)
 	}
 
 	// 同键换计划 → 409；调用方的意图被改写，不得静默复用。
@@ -129,7 +137,7 @@ func TestSubmitParent_InvalidPlanIs400AndNamesTheField(t *testing.T) {
 }
 
 func TestSubmitParent_WalkForwardCountsWindowsAndNamesBadDays(t *testing.T) {
-	s, _, _ := newParentServer(t)
+	s, jobs, _ := newParentServer(t)
 
 	days := make([]string, 10)
 	start := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
@@ -153,6 +161,10 @@ func TestSubmitParent_WalkForwardCountsWindowsAndNamesBadDays(t *testing.T) {
 	if out.Kind != "walkforward" || out.Total != 3 {
 		t.Fatalf("walkforward body = %s, want kind=walkforward total=3 windows", resp)
 	}
+	// 3 个窗口 × (train, test) = 6 条子 run；父的 total 仍是窗口数 3。
+	if kids, err := jobs.ListChildren(t.Context(), out.ParentJobID); err != nil || len(kids) != 6 {
+		t.Fatalf("children = %d / %v, want 6", len(kids), err)
+	}
 
 	bad := fmt.Sprintf(`{"idempotency_key":"wf-2","kind":"walkforward","walkforward":{
 		"base_run_spec":%s,
@@ -166,10 +178,10 @@ func TestSubmitParent_WalkForwardCountsWindowsAndNamesBadDays(t *testing.T) {
 
 // TestGetParent_CountsAndChildrenDoNotCollapse 是「父状态不塌缩」的可执行形式：
 // 三值计数逐项保留（不是一句 completed 布尔），pending 挡住完成，failed 不被吞；
-// children 给出每个子 run 自己的 K9 结论。
+// children 给出每个子 run 自己的 K9 结论（子 run 由提交时的入队方写入）。
 func TestGetParent_CountsAndChildrenDoNotCollapse(t *testing.T) {
 	s, jobs, parentStore := newParentServer(t)
-	svc := parents.New(parentStore)
+	svc := parents.New(parentStore, jobs)
 	ctx := t.Context()
 
 	code, resp := do(t, s, "POST", "/api/runs/parents", batchParentBody("batch-1"))
@@ -178,27 +190,24 @@ func TestGetParent_CountsAndChildrenDoNotCollapse(t *testing.T) {
 	}
 	parent := decodeParentSubmit(t, resp)
 
-	// 三个子 run：completed / invalid / failed 各一条（第四个留在 pending）。
-	children := make([]string, 0, 3)
-	for i := 0; i < 3; i++ {
-		child, _, err := jobs.Enqueue(ctx, &queue.RunRecord{
-			IdempotencyKey: fmt.Sprintf("child-%d", i),
-			ParentJobID:    parent.ParentJobID,
-			RequestJSON:    []byte(parentBaseSpec),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		children = append(children, child.ID)
+	// 提交已把 4 个网格点入队；领取其中 3 条分别落 completed / invalid / failed，
+	// 第 4 条留在 pending。
+	kids, err := jobs.ListChildren(ctx, parent.ParentJobID)
+	if err != nil || len(kids) != 4 {
+		t.Fatalf("children after submit = %d / %v, want 4", len(kids), err)
 	}
-	// 领取顺序由 id 决定，不一定等于入队顺序——结论按「实际被领取的子 run」
-	// 记账，避免把 failed 贴到另一个 child 上。
-	resultByChild := make(map[string]string, len(children))
+	children := make([]string, 0, 3)
+	resultByChild := make(map[string]string, 3)
 	for i, result := range []string{"completed", "invalid", "failed"} {
 		claimed, err := jobs.Claim(ctx, "w-1", time.Minute)
 		if err != nil || claimed == nil {
 			t.Fatalf("claim %d: job=%v err=%v", i, claimed, err)
 		}
+		if claimed.ParentJobID != parent.ParentJobID {
+			t.Fatalf("claimed child %s parent_job_id = %q, want %q",
+				claimed.ID, claimed.ParentJobID, parent.ParentJobID)
+		}
+		children = append(children, claimed.ID)
 		resultByChild[claimed.ID] = result
 		if result == "failed" {
 			err = jobs.Fail(ctx, claimed.ID, "w-1", "engine boom", "failed")
@@ -210,19 +219,21 @@ func TestGetParent_CountsAndChildrenDoNotCollapse(t *testing.T) {
 		}
 	}
 
-	// 汇总：1 completed / 1 invalid / 1 failed / 1 pending → running（不塌缩）。
-	outcomes := make([]plan.TaskOutcome, 0, len(children)+1)
-	for _, childID := range children {
-		o := plan.TaskOutcome{RunID: childID, ResultStatus: queue.ResultStatus(resultByChild[childID])}
-		if o.ResultStatus == queue.ResultCompleted {
-			o.Score = ptrFloat(1.2)
-		}
-		if o.ResultStatus == queue.ResultFailed {
-			o.Error = "engine boom"
+	// 汇总：必须为**每个**子 run 交一条 outcome；未回报的那条用空 ResultStatus。
+	outcomes := make([]plan.TaskOutcome, 0, len(kids))
+	for _, kid := range kids {
+		o := plan.TaskOutcome{RunID: kid.ID}
+		if result, ok := resultByChild[kid.ID]; ok {
+			o.ResultStatus = queue.ResultStatus(result)
+			if o.ResultStatus == queue.ResultCompleted {
+				o.Score = ptrFloat(1.2)
+			}
+			if o.ResultStatus == queue.ResultFailed {
+				o.Error = "engine boom"
+			}
 		}
 		outcomes = append(outcomes, o)
 	}
-	outcomes = append(outcomes, plan.TaskOutcome{RunID: "still-pending"})
 	if _, err := svc.ApplyBatchSummary(ctx, parent.ParentJobID, outcomes); err != nil {
 		t.Fatalf("apply summary: %v", err)
 	}
@@ -242,8 +253,8 @@ func TestGetParent_CountsAndChildrenDoNotCollapse(t *testing.T) {
 	if view.Counts != want {
 		t.Fatalf("counts = %+v, want %+v（三值不得被压成一个布尔）", view.Counts, want)
 	}
-	if len(view.Children) != 3 {
-		t.Fatalf("children = %d, want 3", len(view.Children))
+	if len(view.Children) != 4 {
+		t.Fatalf("children = %d, want 4", len(view.Children))
 	}
 	byID := map[string]parentChildView{}
 	for _, c := range view.Children {
@@ -266,13 +277,35 @@ func TestGetParent_CountsAndChildrenDoNotCollapse(t *testing.T) {
 			t.Fatalf("child %s result_status = %v, want %s", childID, c.ResultStatus, wantResult)
 		}
 	}
+	// 未回报的那条：队列生命周期是 pending，K9 结论为空（不伪造结论）。
+	settled := make(map[string]bool, len(children))
+	for _, id := range children {
+		settled[id] = true
+	}
+	for _, kid := range kids {
+		if settled[kid.ID] {
+			continue
+		}
+		c := byID[kid.ID]
+		if c.Status != "pending" || c.ResultStatus != nil {
+			t.Fatalf("pending child %s = %s/%v, want pending/null", kid.ID, c.Status, c.ResultStatus)
+		}
+	}
 
 	// 全部落定且含失败 → failed；三值计数仍逐项保留。
-	final := make([]plan.TaskOutcome, 0, len(children)+1)
-	for _, childID := range children {
-		final = append(final, plan.TaskOutcome{RunID: childID, ResultStatus: queue.ResultStatus(resultByChild[childID])})
+	// 第 4 条在汇总里记为 failed（队列行本身仍是 pending——父汇总吃的是调用方
+	// 回报，不回头改写队列生命周期）。
+	final := make([]plan.TaskOutcome, 0, len(kids))
+	for _, kid := range kids {
+		o := plan.TaskOutcome{RunID: kid.ID}
+		if result, ok := resultByChild[kid.ID]; ok {
+			o.ResultStatus = queue.ResultStatus(result)
+		} else {
+			o.ResultStatus = queue.ResultFailed
+			o.Error = "engine boom"
+		}
+		final = append(final, o)
 	}
-	final = append(final, plan.TaskOutcome{RunID: "still-pending", ResultStatus: queue.ResultFailed})
 	if _, err := svc.ApplyBatchSummary(ctx, parent.ParentJobID, final); err != nil {
 		t.Fatalf("apply final summary: %v", err)
 	}
@@ -295,7 +328,10 @@ func TestGetParent_CountsAndChildrenDoNotCollapse(t *testing.T) {
 	}
 }
 
-func TestGetParent_FreshParentHasEmptyChildrenArray(t *testing.T) {
+// TestGetParent_FreshParentListsThePlannedChildren：提交即入队，所以刚建好的父
+// 记录已经能看到 4 个子 run——顺序与计划的网格展开一致，状态全部 pending，
+// `run_spec_hash` 来自 job 行的 `request_hash`。
+func TestGetParent_FreshParentListsThePlannedChildren(t *testing.T) {
 	s, _, _ := newParentServer(t)
 	_, resp := do(t, s, "POST", "/api/runs/parents", batchParentBody("batch-1"))
 	parent := decodeParentSubmit(t, resp)
@@ -304,12 +340,35 @@ func TestGetParent_FreshParentHasEmptyChildrenArray(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("get parent: %d %s", code, resp)
 	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(resp), &raw); err != nil {
+	var view parentView
+	if err := json.Unmarshal([]byte(resp), &view); err != nil {
 		t.Fatal(err)
 	}
-	if string(raw["children"]) != "[]" {
-		t.Fatalf("children = %s, want []（空列表 JSON 稳定）", raw["children"])
+	if len(view.Children) != 4 {
+		t.Fatalf("children = %d, want 4（提交即入队）", len(view.Children))
+	}
+
+	want, err := plan.ExpandBatch(plan.BatchRequest{
+		BaseRunSpec: json.RawMessage(parentBaseSpec),
+		Grid: map[string][]json.RawMessage{
+			"lookback":  {json.RawMessage(`10`), json.RawMessage(`20`)},
+			"threshold": {json.RawMessage(`0.1`), json.RawMessage(`0.2`)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, c := range view.Children {
+		if c.Status != "pending" || c.ResultStatus != nil {
+			t.Fatalf("child %d = %s/%v, want pending/null", i, c.Status, c.ResultStatus)
+		}
+		wantHash, err := queue.RequestHash(want[i].Request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.RunSpecHash != wantHash {
+			t.Fatalf("child %d run_spec_hash = %s, want %s（顺序与计划一致）", i, c.RunSpecHash, wantHash)
+		}
 	}
 }
 

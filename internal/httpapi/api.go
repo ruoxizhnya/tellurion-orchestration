@@ -39,10 +39,14 @@ type Option func(*Server)
 
 // WithParents 装配 `POST/GET /api/runs/parents`。未提供时这两条路由不注册：
 // 没有父表就没法回答，注册了只会给一个假的 404「父记录不存在」。
+//
+// 父作业的提交会用到两条 port：ParentStore 写 `run.parent_jobs`，JobQueue 写
+// 子 run 的 `parent_job_id`。后者就是构造 Server 时的 q，不另立装配项——否则
+// 两条路径可能指向不同的队列实现。
 func WithParents(store queue.ParentStore) Option {
 	return func(s *Server) {
 		if store != nil {
-			s.psvc = parents.New(store)
+			s.psvc = parents.New(store, s.q)
 		}
 	}
 }

@@ -12,6 +12,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -235,17 +236,15 @@ func TestGetParent_ChildrenCarryThreeHashes(t *testing.T) {
 	}
 	parent := decodeParentSubmit(t, resp)
 
+	// 提交已把 4 个网格点入队；领取计划里的第一条（created_at 最早）落 invalid。
 	ctx := t.Context()
-	child, _, err := m.Enqueue(ctx, &queue.RunRecord{
-		IdempotencyKey: "child-x0",
-		ParentJobID:    parent.ParentJobID,
-		RequestJSON:    []byte(parentBaseSpec),
-	})
-	if err != nil {
-		t.Fatal(err)
+	kids, err := m.ListChildren(ctx, parent.ParentJobID)
+	if err != nil || len(kids) != 4 {
+		t.Fatalf("children after submit = %d / %v, want 4", len(kids), err)
 	}
-	if _, err := m.Claim(ctx, "w-1", time.Minute); err != nil {
-		t.Fatal(err)
+	child, err := m.Claim(ctx, "w-1", time.Minute)
+	if err != nil || child == nil {
+		t.Fatalf("claim: job=%v err=%v", child, err)
 	}
 	if err := m.Complete(ctx, child.ID, "w-1", "invalid", "mem://results/"+child.ID); err != nil {
 		t.Fatalf("complete child: %v", err)
@@ -276,12 +275,12 @@ func TestGetParent_ChildrenCarryThreeHashes(t *testing.T) {
 	if err := json.Unmarshal([]byte(resp), &view); err != nil {
 		t.Fatal(err)
 	}
-	if len(view.Children) != 1 {
-		t.Fatalf("children = %d, want 1: %s", len(view.Children), resp)
+	if len(view.Children) != 4 {
+		t.Fatalf("children = %d, want 4: %s", len(view.Children), resp)
 	}
 	c := view.Children[0]
 	if c.RunID != child.ID || c.Status != "completed" {
-		t.Fatalf("child = %+v", c)
+		t.Fatalf("child = %+v, want %s", c, child.ID)
 	}
 	if c.ResultStatus == nil || *c.ResultStatus != "invalid" {
 		t.Fatalf("child result_status = %v, want invalid（不被读成 failed）", c.ResultStatus)
@@ -311,17 +310,15 @@ func TestGetParent_ChildrenWithoutArtifactsOmitHashes(t *testing.T) {
 	}
 	parent := decodeParentSubmit(t, resp)
 
+	// 提交已把 4 个网格点入队；领取第一条并落 failed（无留痕）。
 	ctx := t.Context()
-	child, _, err := m.Enqueue(ctx, &queue.RunRecord{
-		IdempotencyKey: "child-no-art",
-		ParentJobID:    parent.ParentJobID,
-		RequestJSON:    []byte(parentBaseSpec),
-	})
-	if err != nil {
-		t.Fatal(err)
+	kids, err := m.ListChildren(ctx, parent.ParentJobID)
+	if err != nil || len(kids) != 4 {
+		t.Fatalf("children after submit = %d / %v, want 4", len(kids), err)
 	}
-	if _, err := m.Claim(ctx, "w-1", time.Minute); err != nil {
-		t.Fatal(err)
+	child, err := m.Claim(ctx, "w-1", time.Minute)
+	if err != nil || child == nil {
+		t.Fatalf("claim: job=%v err=%v", child, err)
 	}
 	if err := m.Fail(ctx, child.ID, "w-1", "route rejected", "failed"); err != nil {
 		t.Fatal(err)
@@ -337,16 +334,26 @@ func TestGetParent_ChildrenWithoutArtifactsOmitHashes(t *testing.T) {
 	if err := json.Unmarshal(raw["children"], &children); err != nil {
 		t.Fatal(err)
 	}
-	if len(children) != 1 {
-		t.Fatalf("children = %d", len(children))
+	if len(children) != 4 {
+		t.Fatalf("children = %d, want 4", len(children))
 	}
-	if _, has := children[0]["dataset_snapshot_hash"]; has {
+	var failed map[string]json.RawMessage
+	for _, c := range children {
+		if string(c["run_id"]) == fmt.Sprintf("%q", child.ID) {
+			failed = c
+			break
+		}
+	}
+	if failed == nil {
+		t.Fatalf("failed child %s missing from response: %s", child.ID, raw["children"])
+	}
+	if _, has := failed["dataset_snapshot_hash"]; has {
 		t.Fatalf("未产出的子不得伪造 dataset_snapshot_hash: %s", raw["children"])
 	}
-	if _, has := children[0]["artifact_hash"]; has {
+	if _, has := failed["artifact_hash"]; has {
 		t.Fatalf("未产出的子不得伪造 artifact_hash: %s", raw["children"])
 	}
-	if string(children[0]["run_spec_hash"]) == "" || string(children[0]["run_spec_hash"]) == "null" {
+	if string(failed["run_spec_hash"]) == "" || string(failed["run_spec_hash"]) == "null" {
 		t.Fatalf("run_spec_hash 必须对任何子都在: %s", raw["children"])
 	}
 }
