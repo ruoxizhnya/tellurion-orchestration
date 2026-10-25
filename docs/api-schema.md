@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-25
-verified-by: 施工 ⑩（父作业提交即入队子 run：`parent_job_id` 的写入方落 `internal/parents`；子 run 幂等键 = `parent:<parent_job_id>:<child_index>`，stable）
+verified-by: 施工 ⑪（X5c worker 打活面：注册 / 心跳 / 领取 / 续租 / 上报 / 取消确认 + 父子 run 完成时真实写回父汇总）
 ---
 
 # API Schema — tellurion-orchestration
@@ -9,6 +9,7 @@ verified-by: 施工 ⑩（父作业提交即入队子 run：`parent_job_id` 的�
 > **实现状态（2026-10-24，施工 ③/⑥）**：`internal/queue` 已落 `JobQueue` / `WorkerRegistry` 两个 **Go port** + 内存实现 + `run` schema DDL **并已接 PG**（X5a/X5c + 施工 ③）：PG 实现在 `internal/pgstore`，与内存实现跑**同一套**语义用例（`internal/qtest`，每个实现 45 条 = 队列 30 + 注册表 9 + 跨 port 6），启动迁移在 `cmd/orchestrationservice`。`internal/httpapi` 已落**任务 4 端点**（`POST`/`GET list`/`GET {id}`/`DELETE {id}`，§1「任务」表）——端点行为按 §2 的错误码与幂等语义实现，哨兵 → wire code 的映射在 `internal/httpapi/api.go` 的 `classify`。**仍未实现**：worker / provenance 端点（X5c / X0）；鉴权（R5 未裁，`unauthenticated` / `forbidden` 暂不产生）。
 > **X5b 父表（2026-10-25 施工 ⑦，裁-13）**：`run.parent_jobs` 与 `run.backtest_jobs.parent_job_id` 已落（内存 + PG 两个 `ParentStore` 实现），`internal/parents` 提供提交（写父表）与汇总（复用 `internal/plan` 写回三值计数）的服务层入口。
 > **X5b 父作业端点（2026-10-25 施工 ⑧）**：`POST /api/runs/parents` 与 `GET /api/runs/parents/{id}` 已实现（`internal/httpapi/parents.go`）——batch / walkforward 共用一套父记录与身份（`plan_hash`），原「每类父各 POST + GET」的 4 个目标端点**不再作为目标契约**（从未实现，无调用方）。**子 run 入队已落（施工 ⑩）**：提交即写 `parent_job_id`；worker 执行仍未落。
+> **X5c worker 打活面（2026-10-25 施工 ⑪）**：注册 / 心跳 / 领取 / 续租 / 上报结论 / 取消确认 + 运维面（列表 / drain）已在 `internal/httpapi/workers.go` 落地。**worker 进程不在本仓**（零 import core 是硬约束）：它跑 core 的引擎，经这组 HTTP 端点领活。子 run 上报结论后，服务端**立即重算并写回父汇总**（`parents.SyncSummary`）——这是 X5b「父汇总真实写回」的入口，不再依赖测试里的 SQL 模拟。
 > 本文件是**目标契约**，不是现状说明书；开工顺序见 `docs/TASKS.md` 的「施工序」。
 > **请求 / 响应形状、状态机、幂等键与 `run` schema 的目标键**见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9（M8 接口对表）。本文件只钉**对外行为**（方法、路径、错误码、幂等），不重复字段表。
 
@@ -23,9 +24,12 @@ verified-by: 施工 ⑩（父作业提交即入队子 run：`parent_job_id` 的�
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | POST | `/api/runs/jobs` | 提交单次回测（幂等键）→ `job_id` |
-| GET | `/api/runs/jobs/{id}` | 查状态 / 摘要结果 |
+| GET | `/api/runs/jobs/{id}` | 查状态 / 摘要结果（含 `cancel_requested`） |
 | DELETE | `/api/runs/jobs/{id}` | 取消 |
 | GET | `/api/runs/jobs?status=&result_status=&limit=` | 列表 |
+| POST | `/api/runs/jobs/{id}/lease` | worker 续租 |
+| POST | `/api/runs/jobs/{id}/result` | worker 上报结论（completed / invalid / failed） |
+| POST | `/api/runs/jobs/{id}/cancel-ack` | worker（owner）确认取消 |
 
 ### 批量 / 前向（父作业，X5b）
 
@@ -61,6 +65,7 @@ verified-by: 施工 ⑩（父作业提交即入队子 run：`parent_job_id` 的�
 
 - `trading_days` **由调用方传入**（`YYYY-MM-DD`，严格递增）：本仓不自造交易日历，日历属 data 服务的只读 port（`dataflow.md`）；缺省 / 非法日期 → `invalid_params` 并点名到 `walkforward.trading_days[i]`。
 - **提交即入队（施工 ⑩）**：父记录落库后，逐条把子 run 写进 `run.backtest_jobs` 并填 `parent_job_id`（batch = 每个网格点一条；walkforward = 每窗 `train` / `test` 各一条）。子 run 幂等键 = `parent:<parent_job_id>:<child_index>`（**stable**；改规则 = MAJOR），同一份计划重放（哪怕换幂等键）派生出同一批键。父记录与子 run 不在一个事务里：子 run 入队中途失败（如 429 `queue_full`）时父记录保留，**重放同一请求**按幂等键补齐即可，不会产生重复子 run。
+- **父汇总真实写回（施工 ⑪）**：worker 每次经 `POST /api/runs/jobs/{id}/result` 或 `cancel-ack` 把一条子 run 写到终态，服务端就按计划顺序重算子 run 结论并写回 `run.parent_jobs`（`parents.SyncSummary`）。`summary` 里的 `Tasks`（batch）/ `Windows`（walkforward）顺序 = 计划顺序；没有 score 时 `rank=0`（本仓不解析结果内容，不猜分数）。子 run 齐全才写：少一条即报错，漏报不会被当成完成。
 - 网格空 / 取值非标量 / 展开超过 100 / 窗口参数非法 / 区间不足 → `invalid_params`，报文点名字段（`grid`、`train_days`…）。
 - 响应：新建 **202**，幂等重放 **200**，体为
   `{parent_job_id, kind, status, plan_hash, total, counts:{completed,invalid,failed,pending,settled}, idempotent_replay?}`。
@@ -93,8 +98,37 @@ verified-by: 施工 ⑩（父作业提交即入队子 run：`parent_job_id` 的�
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/api/runs/workers` | worker 池状态 |
+| POST | `/api/runs/workers` | 注册 worker（幂等） |
+| POST | `/api/runs/workers/{id}/heartbeat` | 心跳（存活证明） |
+| POST | `/api/runs/workers/{id}/claim` | 按声明内核领取一条 run → `{job}` / `{job:null}` |
 | POST | `/api/runs/workers/{id}/drain` | 摘除 worker（滚动升级） |
+| GET | `/api/runs/workers` | worker 池状态 |
+
+**worker 协议（X5c，施工 ⑪）**：
+
+```json
+// POST /api/runs/workers
+{"worker_id": "host-pid-1700000000", "kernels": ["go"]}
+// → 200 {"worker_id":"…","status":"active","kernels":["go"]}
+
+// POST /api/runs/workers/{id}/claim   （无 body）
+// → 200 {"job": {"run_id":"…","run_spec":{…完整 RunSpec…},"attempts":0,
+//               "max_attempts":3,"lease_until":"…","cancel_requested":false,
+//               "parent_job_id":"…"}}
+// → 200 {"job": null}   无活（不是 404）
+
+// POST /api/runs/jobs/{id}/result
+{"worker_id":"…","status":"completed","result_status":"completed|invalid","result_uri":"backtest:…"}
+{"worker_id":"…","status":"failed","result_status":"failed","error":"engine boom"}
+```
+
+- **`kernels` 空数组归一成 NULL**：空数组在 PG 的 `= ANY('{}')` 里是「什么都不能干」，而「未声明能力」的语义是**不过滤**。空名字（`""`）→ 400 `invalid_params`。
+- **领取只认已注册的 worker**（未知 → 404 `worker_not_found`）；`draining` / `offline` → 409 `worker_draining`。
+- **声明了 `kernels` 就必须按内核过滤**：队列实现不支持 `KernelAwareJobQueue` 时 → 503 `kernel_filter_unavailable`，**不**静默退回不过滤（那会把 nautilus 的活派给 go worker）。
+- **租约由服务端决定**（部署参数 `-worker-lease`，默认 60s）；worker 在到期前续租（`POST /jobs/{id}/lease`）：不是 owner / 已过期 / 已终态 → 409 `lease_lost`，worker 必须立即停止写入。
+- **`result` 写完后服务端立即重算父汇总**：`status=completed` 要求 `result_status ∈ {completed, invalid}` 且 `result_uri` 非空；`failed` 要求 `error` 非空。父汇总写不进去 → 500 `parent_summary_failed`（子 run 状态已写成功，重放同一上报即可，终态 + 同载荷是幂等的）。
+- **取消**：`cancel_requested` 可经 `GET /jobs/{id}` 或 claim 响应读到；worker 中止后调 `cancel-ack`（owner 才能确认），服务端随后把该子 run 计入父汇总（`cancelled` 按 failed 计——它是终态但不是 K9 结论，不映射会让父记录永远停在 running）。
+- `GET /api/runs/workers` 的 `kernels` 恒为数组（未声明 = `[]`）；`GET /api/runs/jobs/{id}` 新增 `cancel_requested`（加字段 = MINOR）。
 
 ### 结果坐标（X0）
 
@@ -149,7 +183,11 @@ verified-by: 施工 ⑩（父作业提交即入队子 run：`parent_job_id` 的�
 | `idempotency_conflict` | 409 | 同键 + 不同 `request_hash`（job）/ 不同 `plan_hash`（父作业） | 换键或确认意图；**不得**静默复用旧 job |
 | `job_not_found` | 404 | `GET`/`DELETE` 未知 run id | 不重试 |
 | `parent_not_found` | 404 | 未知 `parent_job_id`（batch / walkforward 共用） | 不重试 |
-| `worker_not_found` | 404 | `drain` 未知 worker | 不重试 |
+| `worker_not_found` | 404 | 心跳 / 领取 / `drain` 未知 worker | 不重试 |
+| `worker_draining` | 409 | `draining` / `offline` worker 领取新活 | 停止领取；等 `offline` 回收或换 worker |
+| `lease_lost` | 409 | 续租 / 上报时租约已过期、已被回收或行已终态 | **立即停止**；不得再写结果（写不进去） |
+| `kernel_filter_unavailable` | 503 | worker 声明了 `kernels`，但队列实现不支持按内核过滤 | 不重试领取；换部署 / 修装配（**不**静默不过滤） |
+| `parent_summary_failed` | 500 | 子 run 状态已写，但父汇总重算 / 写回失败 | 幂等重放同一上报（终态 + 同载荷是 no-op） |
 | `invalid_transition` | 409 | 对终态 job / worker 做非法迁移（如 terminal job 再 `Complete`、`offline` worker 再 drain） | 读当前状态再决定 |
 | `provenance_not_ready` | 409 | job 非终态，provenance 尚未写 | 退避轮询 |
 | `provenance_not_found` | 404 | job 终态 `failed` / `cancelled` 且从未写 provenance（如路由拒绝 / 从未跑到写留痕那一步） | 读 job 的 `error`；不重试读取 |
@@ -182,6 +220,7 @@ verified-by: 施工 ⑩（父作业提交即入队子 run：`parent_job_id` 的�
 - **状态机**：job 的 `status` 是队列生命周期，K9 `result_status` 是结果结论（两轴，不合并）。新增**非终态** = MINOR（旧客户端按"未完成"处理）；新增**终态** = MAJOR（旧客户端可能永远等待）；改终态语义 = MAJOR。`result_status` 只允许 K9 三值，第四值 = 契约变更（SPEC 评审）。
 - **三 hash 的算法变更** = MAJOR（历史 run 的坐标会变；`run_artifacts` 是冻结面）。
 - **端点只增不删**；取消从「`pending` 删行」改「取消保留」是语义变更 = MAJOR，必须给旧消费方切换窗口（`ARCHITECTURE.md` §9.7 R1）。
+- **X5c worker 端点（施工 ⑪）**：新增端点 / 新增 wire code / `GET /jobs/{id}` 加 `cancel_requested` 都是 **MINOR**（旧客户端不读新键即可）；`kernels` 空数组归一成 NULL 是**修复**既有实现的语义，不改变 wire 形状。
 - 详细版本矩阵见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.6；不在本文件重复。
 
 ## 5. 不提供什么（边界）

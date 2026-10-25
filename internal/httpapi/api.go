@@ -9,6 +9,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -28,10 +29,12 @@ const MaxBodyBytes = 1 << 20
 // artifacts 为 nil 时不注册 provenance 路由：没有留痕表就没有三 hash 可答，
 // 注册了只会给一个假的 404「run 从未产出」，把「未装配」伪装成「没产出」。
 type Server struct {
-	q         queue.JobQueue
-	psvc      *parents.Service
-	artifacts queue.ArtifactStore
-	mux       *http.ServeMux
+	q           queue.JobQueue
+	psvc        *parents.Service
+	artifacts   queue.ArtifactStore
+	workers     queue.WorkerRegistry
+	workerLease time.Duration
+	mux         *http.ServeMux
 }
 
 // Option 是装配可选项（父作业端点需要 ParentStore，单跑 jobs 时不必提供）。
@@ -67,6 +70,23 @@ func New(q queue.JobQueue, opts ...Option) *Server {
 	for _, opt := range opts {
 		opt(s)
 	}
+	// worker 打活面（X5c）：装配期能力断言，fail-closed。ClaimByKernel 是
+	// 可选接口——派活装配若不能按内核过滤，就会把「以为按能力派活」变成
+	// 静默退回不过滤（docs/ARCHITECTURE.md §9.8 取舍 6）。父汇总写回同理：
+	// 没有 ParentChildLister 就重算不出父记录，不能在运行到第一次上报时才发现。
+	if s.workers != nil {
+		if s.workerLease <= 0 {
+			panic("httpapi: WithWorkers requires a positive lease")
+		}
+		if _, ok := s.q.(queue.KernelAwareJobQueue); !ok {
+			panic(fmt.Sprintf("httpapi: WithWorkers requires queue.KernelAwareJobQueue, got %T", s.q))
+		}
+		if s.psvc != nil {
+			if _, ok := s.q.(queue.ParentChildLister); !ok {
+				panic(fmt.Sprintf("httpapi: WithParents + WithWorkers requires queue.ParentChildLister, got %T", s.q))
+			}
+		}
+	}
 	s.mux.HandleFunc("POST /api/runs/jobs", s.submit)
 	s.mux.HandleFunc("GET /api/runs/jobs", s.list)
 	s.mux.HandleFunc("GET /api/runs/jobs/{id}", s.get)
@@ -80,6 +100,9 @@ func New(q queue.JobQueue, opts ...Option) *Server {
 		// `GET /api/runs/parents/{id}` 在 `/api/runs/parents/provenance` 上冲突
 		// （互不更具体 ⇒ 注册期 panic）。jobs / parents 都比它具体，仍优先。
 		s.mux.HandleFunc("GET /api/runs/{rest...}", s.provenance)
+	}
+	if s.workers != nil {
+		s.registerWorkerRoutes()
 	}
 	return s
 }
@@ -104,15 +127,16 @@ type statusBody struct {
 
 // jobView 是 GET 的响应体（§9.4 冻结字段集；时间为零值时出 null）。
 type jobView struct {
-	JobID        string     `json:"job_id"`
-	Status       string     `json:"status"`
-	ResultStatus *string    `json:"result_status"`
-	Error        string     `json:"error,omitempty"`
-	ResultURI    string     `json:"result_uri,omitempty"`
-	RunSpecHash  string     `json:"run_spec_hash"`
-	CreatedAt    *time.Time `json:"created_at"`
-	StartedAt    *time.Time `json:"started_at"`
-	CompletedAt  *time.Time `json:"completed_at"`
+	JobID           string     `json:"job_id"`
+	Status          string     `json:"status"`
+	ResultStatus    *string    `json:"result_status"`
+	Error           string     `json:"error,omitempty"`
+	ResultURI       string     `json:"result_uri,omitempty"`
+	RunSpecHash     string     `json:"run_spec_hash"`
+	CancelRequested bool       `json:"cancel_requested"`
+	CreatedAt       *time.Time `json:"created_at"`
+	StartedAt       *time.Time `json:"started_at"`
+	CompletedAt     *time.Time `json:"completed_at"`
 }
 
 type listBody struct {
@@ -176,15 +200,16 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 
 func jobViewOf(job *queue.RunRecord) jobView {
 	return jobView{
-		JobID:        job.ID,
-		Status:       string(job.Status),
-		ResultStatus: resultStatusPtr(job.ResultStatus),
-		Error:        job.ErrorMessage,
-		ResultURI:    job.ResultURI,
-		RunSpecHash:  job.RequestHash,
-		CreatedAt:    timePtr(job.CreatedAt),
-		StartedAt:    timePtr(job.StartedAt),
-		CompletedAt:  timePtr(job.CompletedAt),
+		JobID:           job.ID,
+		Status:          string(job.Status),
+		ResultStatus:    resultStatusPtr(job.ResultStatus),
+		Error:           job.ErrorMessage,
+		ResultURI:       job.ResultURI,
+		RunSpecHash:     job.RequestHash,
+		CancelRequested: job.CancelRequested,
+		CreatedAt:       timePtr(job.CreatedAt),
+		StartedAt:       timePtr(job.StartedAt),
+		CompletedAt:     timePtr(job.CompletedAt),
 	}
 }
 
@@ -199,6 +224,13 @@ func (s *Server) cancel(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := s.q.Get(r.Context(), id)
 	if err != nil {
+		writeError(w, err)
+		return
+	}
+	// 取消也是子 run 的结论变化（pending → cancelled）：父汇总要跟着动，
+	// 否则父记录会一直等到一个不会再来的回报。running → cancelling 不是终态，
+	// SyncSummary 会把它算成 pending（父记录保持 running）。
+	if err := s.syncParent(r.Context(), job); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -291,6 +323,8 @@ func classify(err error) (int, string) {
 		return http.StatusNotFound, "job_not_found"
 	case errors.Is(err, queue.ErrParentNotFound):
 		return http.StatusNotFound, "parent_not_found"
+	case errors.Is(err, queue.ErrWorkerNotFound):
+		return http.StatusNotFound, "worker_not_found"
 	case errors.Is(err, plan.ErrInvalidRequest):
 		return http.StatusBadRequest, "invalid_params"
 	case errors.Is(err, queue.ErrIdempotencyConflict):
@@ -299,6 +333,14 @@ func classify(err error) (int, string) {
 		return http.StatusTooManyRequests, "queue_full"
 	case errors.Is(err, queue.ErrInvalidTransition):
 		return http.StatusConflict, "invalid_transition"
+	case errors.Is(err, queue.ErrLeaseLost):
+		return http.StatusConflict, "lease_lost"
+	case errors.Is(err, queue.ErrWorkerDraining):
+		return http.StatusConflict, "worker_draining"
+	case errors.Is(err, errKernelFilterUnavailable):
+		return http.StatusServiceUnavailable, "kernel_filter_unavailable"
+	case errors.Is(err, errParentSummary):
+		return http.StatusInternalServerError, "parent_summary_failed"
 	case errors.Is(err, queue.ErrInvalidInput):
 		return http.StatusBadRequest, "invalid_params"
 	default:

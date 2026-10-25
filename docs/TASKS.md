@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-10-25
-verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩（④ = R8 / R9；⑤ = R10；⑥ = X5b 规划与汇总 + 共享套件；⑦ = 裁-13 父表 `parent_jobs` + `backtest_jobs.parent_job_id` + 提交 / 汇总落库；⑧ = 父作业 HTTP 2 端点 + plan_hash 身份；⑨ = X0 三 hash 读面 `run_artifacts` + `/provenance`；⑩ = 子 run 入队 + `parent_job_id` 写入方）
+verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；⑤ = R10；⑥ = X5b 规划与汇总 + 共享套件；⑦ = 裁-13 父表 `parent_jobs` + `backtest_jobs.parent_job_id` + 提交 / 汇总落库；⑧ = 父作业 HTTP 2 端点 + plan_hash 身份；⑨ = X0 三 hash 读面 `run_artifacts` + `/provenance`；⑩ = 子 run 入队 + `parent_job_id` 写入方；⑪ = X5c worker 打活面 + 父汇总真实写回）
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -130,6 +130,20 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩（④ = R8 / R9；⑤ =
 > **验收对照（本单）**：① `parent_job_id` 有唯一写入方——逐条断言 `ParentJobID` / 派生键 / `request_hash`；② 同计划重放不重复——同键与换键两条腿都断言子 run id 集合不变；③ 部分失败可续——深度 2 的队列走两轮「领取 → 重放」补齐 4 条且无重复键；④ `GET /api/runs/parents/{id}` 的 `children[]` 不再是空数组（batch 4 / walkforward 6）。**未落（如实）**：worker 执行（本仓没有 worker 进程）；PG 腿本轮未在有库环境实跑。
 > **台账**：G3 ① 子 run 入队 ✅（2026-10-25）；QT-44 整体仍 🔶——worker 执行、worker 进程 / 端点、鉴权（R5）未落。
 
+> **施工记录（2026-10-25，施工 ⑪：H5 worker 打活面 + 父汇总真实写回）**：`internal/queue` 的 port 早已落全，本轮补的是「谁调这些接口」与「子 run 上报后父汇总怎么真的写回」。
+> **落点**：`internal/httpapi/workers.go` —— `POST /api/runs/workers`（注册，幂等）/ `POST /api/runs/workers/{id}/heartbeat` / `POST /api/runs/workers/{id}/claim` / `POST /api/runs/workers/{id}/drain` / `GET /api/runs/workers` / `POST /api/runs/jobs/{id}/lease` / `POST /api/runs/jobs/{id}/result` / `POST /api/runs/jobs/{id}/cancel-ack`；`api.go` 的 `WithWorkers` 装配项、`jobView` 加 `cancel_requested`、`classify` 加 `lease_lost` / `worker_draining` / `kernel_filter_unavailable` / `parent_summary_failed`；`internal/parents.SyncSummary`（从已入队子 run 重算并写回父汇总）；`cmd/orchestrationservice` 加 `-worker-lease` 与监听前的能力断言。
+> **装配期能力断言（fail-closed）**：`WithWorkers` 要求队列实现 `KernelAwareJobQueue`；同时装了父作业时还要求 `ParentChildLister`。`cmd` 在监听前再显式检查一遍并给出可读错误——不提供这两条能力的实现**不允许带着「以为会按内核派活 / 以为会写回父汇总」启动**。领取时：worker 声明了 `kernels` 才走 `ClaimByKernel`；队列不支持 → 503 `kernel_filter_unavailable`，**绝不静默退回不过滤**。
+> **`kernels: []` 归一成 NULL**：HTTP 层把空数组归一成 nil 再交给注册表（PG 的 `= ANY('{}')` 会被读成「什么都不能干」，与「未声明能力 = 不过滤」相反）；空名字（`""`）→ 400。
+> **父汇总真实写回**：`result` / `cancel-ack` 写完子 run 终态后调用 `SyncSummary`。它按 `ParentChildLister` 读回全部子 run，batch 用 `AggregateBatch`、walkforward 用 `AggregateWalkForward`；walkforward 的「子 run → 窗口 / 段」映射取自 `plan_canonical`（不靠下标猜）；已终态且计数 / 明细未变的父记录不重写（重复上报不刷新 `completed_at`）。`cancelled` 是终态但不是 K9 结论，按 `failed` 计入父汇总——不映射会让父记录永远停在 `running`。汇总写失败 → 500 `parent_summary_failed`，子 run 状态已写成功，重放同一上报即可（终态 + 同载荷幂等）。
+> **测试（真实输出）**：`internal/httpapi/workers_test.go` 16 个顶层用例（注册归一 / 去重与空名拒绝 / 未知 worker 404 / 内核过滤 / 空声明不过滤 / draining 拒绝 / 装配 panic / 续租与 fencing / 上报 completed 驱动父汇总并保序 / invalid 不是 failed / failed 带错误并拖垮父 / 载荷校验 / cancel-ack 收尾父 / walkforward 六段三窗 / 路由不被 provenance catch-all 抢 / HTTP 层真的把 nil 交给注册表）；内存腿与 `ORCHESTRATION_TEST_DSN` 的 PG 腿同跑。
+> **破坏验证（三条腿，改坏 → 红 → 逐字节还原 → 绿；还原用 sha256 比对 `internal/httpapi/workers.go` = `7569e96c…`）**：
+> 1. `syncParent` 直接 `return nil`（`if true || …`）→ 四条红：`TestReport_CompletedWritesParentSummaryFromChildren`（`after 1/2 … Completed:0 Pending:2`）、`TestReport_InvalidIsNotFailedInParentAggregation`（`status = running, want completed`）、`TestCancelAck_SettlesParentChild`（父仍 `running`）、`TestWalkForwardSummary_MapsLegsFromPlanCanonical`（父仍 `running`）。
+> 2. 声明内核时改调 `Claim`（绕过 `ClaimByKernel`，`_ = kq` 保语句合法）→ `TestClaim_FiltersByDeclaredKernels` 红：`w-go claimed …「kernel":"nautilus"」…`。
+> 3. `normalizeKernels` 的空数组分支改成 `return in, nil` → 第一版**假绿**：内存实现的 `Clone()` 会把非 nil 空切片洗成 nil，只断言 `List` 的结果测不到 HTTP 层。补 `recordingRegistry`（登记 `Register` 收到的原始记录、不 Clone）后 `TestRegisterWorker_HandsNilKernelsToRegistry` 红：`registry received kernels = []string{}, want nil`。**这是本轮发现并修掉的一条假护栏**。
+> **门禁（真实输出）**：`gofmt -l .` 空；`go build ./...` 退出 0；`go vet ./...` 退出 0；`go test ./... -count=1` 全绿（`cmd/orchestrationservice 0.370s`、`internal/httpapi 0.323s`（含 16 条 worker 用例）、`internal/parents 0.235s`、`internal/pgstore 0.290s`、`internal/plan 0.235s`、`internal/queue 0.250s`）；`ORCHESTRATION_TEST_DSN=… go test ./internal/pgstore -count=1` **PASS 6.673s**（语义套件 + 注册表 + 跨 port，全部跑过；skip ≠ pass）。本机 `-race` 仍跑不了（`CGO_ENABLED=0`、无 C 编译器）。
+> **未落（如实）**：① `run_artifacts` 的**生产者**——worker 进程已在 core（`tellurion:cmd/worker`），但它今天只上报 K9 结论与 `result_uri`，尚未把 core 的三 hash 写入本仓的 `run_artifacts`，本仓也没有对应的写入端点（X0 仍 🔶）；② 鉴权 R5 按裁-15 缓做，worker 身份仍只是一个 id；③ core worker 的生产装配仍有已知缺口（DataAdapter / 市场路由 / risk rules 取数口未搬，锚点 RunSpec 只能恢复 `backtest_jobs` 里有的字段）——见 `tellurion:docs/TASKS.md` QT-44 指针的施工记录。
+> **台账**：X5c ✅（2026-10-25）；X5b 的父汇总写回 ✅；QT-44 整体仍 🔶（X0 生产者 / 鉴权 R5）。
+
 > **⚠️ 工单 G7 的两条验收前提被源码证伪（2026-10-23 实测，如实登记，不当已完成）**：
 > 1. **「`pkg/backtest` 里 `job|batch|walkforward` 零命中」不是本仓能产出的判据**：core `pkg/backtest` 实测 **1032 处命中 / 39 个文件**（`job/job.go` 207、`batch/batch.go` 67、`walkforward/walkforward.go` 34、`aliases.go` 39…）。达成它要的是 core 侧 O3（`tellurion:docs/design/qt-decoupling/orchestration-service-design.md` §7「编排层整体移出 `pkg/backtest`」），而 R1 与本仓 `db-schema.md` §5 冻结的路径是「双写 → 对拍 → 切读 → 停写」——旧路径在 O0 切换前**必须继续服务**。本仓能做的是把 durable 侧与 port 做出来，不能单方面让别人的包变空。
 > 2. **「同一 batch 在服务与旧路径结果一致」与同一张工单的第 2 步自相矛盾**：core 的 batch 只要 `err == nil` 就记 `completed`、从不读 `resp.Status`（`core:pkg/backtest/batch/batch.go:249`），`toBacktestResult` 又把 status 字段丢掉（`:412-446`），于是 K9 `invalid` 被算进 `completed` / `success_count` / 评分均值；工单第 2 步又要求「批量报告不得把 `invalid` 当成功」。**修掉它的代价就是数字不再与旧路径相同**。本仓按「必须相同的部分（网格展开、窗口集合、逐 run 请求派生）钉一致，故意不同的部分（三值计数、失败窗口显式计数）钉分歧」执行，并在 X5b 的验收里逐条写明哪条是哪种。
@@ -161,9 +175,9 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩（④ = R8 / R9；⑤ =
 | 阶段 | 内容 | 上游单号 | 前置 |
 |---|---|---|---|
 | X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① `internal/queue` 语义；② jobs 4 端点 HTTP 面；③ **DDL 已接 PG + 启动迁移 + 双实现共享用例**；④ R8 回收出口 + R9 `ClaimByKernel` 落两个实现）| `QT-44` | 本仓立项 |
-| X5b | batch + walkforward（窗口切分与汇总）🔶 规划与汇总纯函数 + 共享套件（2026-10-24 施工 ⑥）+ **父表 / 子 run 关系 / 提交与汇总落库（2026-10-25 施工 ⑦，裁-13）** + **父作业 HTTP 2 端点（2026-10-25 施工 ⑧，`POST/GET /api/runs/parents`）** + **子 run 入队（2026-10-25 施工 ⑩，`parent_job_id` 唯一写入方）**；**worker 执行未落** | `QT-44` | X5a |
-| X5c | worker 注册 / 心跳 / `drain` / 心跳超时 🔶（施工 ① 内存；③ PG 已落；⑤ 心跳超时→`offline` 两个实现同批 + `cmd` 接线；worker 进程本身未做） | `QT-44` | X5a |
-| X0 | `run_artifacts` 三 hash 留痕 + `/provenance` 🔶（施工 ⑨：`ArtifactStore` 写入端口 + 内存 / PG 两个实现、`GET /api/runs/{id}/provenance` 三态、父 GET 逐子三 hash；**生产者（core 引擎写入方）未落**）。**裁-19 定稿（2026-10-25）**：生产读面改为 **core** `GET /api/backtest/{id}/provenance`（core QT-72）；本仓端点保持 `producer_pending`，`run_artifacts` = worker 写的投影，core 不双写 | `QT-03` | X5a |
+| X5b | batch + walkforward（窗口切分与汇总）🔶 规划与汇总纯函数 + 共享套件（2026-10-24 施工 ⑥）+ **父表 / 子 run 关系 / 提交与汇总落库（2026-10-25 施工 ⑦，裁-13）** + **父作业 HTTP 2 端点（2026-10-25 施工 ⑧，`POST/GET /api/runs/parents`）** + **子 run 入队（2026-10-25 施工 ⑩，`parent_job_id` 唯一写入方）** + **父汇总真实写回（2026-10-25 施工 ⑪：子 run 上报终态即 `SyncSummary`）**；worker **执行**在 core（`tellurion:cmd/worker`），本仓零 import core | `QT-44` | X5a |
+| X5c | worker 注册 / 心跳 / `drain` / 心跳超时 ✅（2026-10-25：施工 ① 内存；③ PG 已落；⑤ 心跳超时→`offline` 两个实现同批 + `cmd` 接线；⑪ **worker 打活 HTTP 面**：注册 / 心跳 / 领取 / 续租 / 上报 / 取消确认 / 列表 / drain，装配期能力断言 fail-closed。**worker 进程在 core**，本仓零 import core） | `QT-44` | X5a |
+| X0 | `run_artifacts` 三 hash 留痕 + `/provenance` 🔶（施工 ⑨：`ArtifactStore` 写入端口 + 内存 / PG 两个实现、`GET /api/runs/{id}/provenance` 三态、父 GET 逐子三 hash；**生产者未落**——worker 进程已在 core（施工 ⑪），但它尚未把 core 的三 hash 写入 `run_artifacts`，本仓也没有写入端点）。**裁-19 定稿（2026-10-25）**：生产读面改为 **core** `GET /api/backtest/{id}/provenance`（core QT-72）；本仓端点保持 `producer_pending`，`run_artifacts` = worker 写的投影，core 不双写 | `QT-03` | X5a |
 
 ## 二、跨仓指针（不在本仓，勿双写）
 

@@ -41,12 +41,13 @@ type Deps struct {
 
 // 编译期断言：装配点声明的 port 必须真能被 pgstore 的实现满足。
 var (
-	_ queue.JobQueue          = (*pgstore.Queue)(nil)
-	_ queue.ParentChildLister = (*pgstore.Queue)(nil)
-	_ queue.ParentStore       = (*pgstore.Parents)(nil)
-	_ queue.WorkerRegistry    = (*pgstore.Registry)(nil)
-	_ queue.WorkerReaper      = (*pgstore.Registry)(nil)
-	_ queue.ArtifactStore     = (*pgstore.Artifacts)(nil)
+	_ queue.JobQueue            = (*pgstore.Queue)(nil)
+	_ queue.KernelAwareJobQueue = (*pgstore.Queue)(nil)
+	_ queue.ParentChildLister   = (*pgstore.Queue)(nil)
+	_ queue.ParentStore         = (*pgstore.Parents)(nil)
+	_ queue.WorkerRegistry      = (*pgstore.Registry)(nil)
+	_ queue.WorkerReaper        = (*pgstore.Registry)(nil)
+	_ queue.ArtifactStore       = (*pgstore.Artifacts)(nil)
 )
 
 func main() {
@@ -64,6 +65,7 @@ func run() error {
 		maxAttempts = flag.Int("default-max-attempts", queue.DefaultMaxAttempts, "未指定 max_attempts 时的重试预算")
 		reapEvery   = flag.Duration("reap-interval", 30*time.Second, "租约回收周期（0 = 关闭）")
 		heartbeatTO = flag.Duration("heartbeat-timeout", 90*time.Second, "超过该时长没有心跳的 worker → offline（0 = 关闭；按 worker 心跳间隔配置）")
+		workerLease = flag.Duration("worker-lease", httpapi.DefaultWorkerLease, "worker 领取时写入的租约时长（worker 必须在此之前续租）")
 		startupTO   = flag.Duration("startup-timeout", 30*time.Second, "连库 + 迁移的超时")
 	)
 	flag.Parse()
@@ -115,10 +117,26 @@ func run() error {
 		go reap(ctx, deps.Jobs, reaper, *reapEvery, *heartbeatTO)
 	}
 
+	// worker 打活面的两条能力断言（X5c）。放在监听之前：带着「以为会按内核
+	// 派活 / 以为会写回父汇总」的进程启动，错误只会在第一次领取 / 第一次上报
+	// 时才现形，而那时已经有运行中的行了。
+	if _, ok := deps.Jobs.(queue.KernelAwareJobQueue); !ok {
+		return fmt.Errorf("job queue %T does not implement queue.KernelAwareJobQueue: "+
+			"worker 声明的 kernels 无法生效（拒绝启动）", deps.Jobs)
+	}
+	if _, ok := deps.Jobs.(queue.ParentChildLister); !ok {
+		return fmt.Errorf("job queue %T does not implement queue.ParentChildLister: "+
+			"子 run 结论无法重算父汇总（拒绝启动）", deps.Jobs)
+	}
+	if *workerLease <= 0 {
+		return fmt.Errorf("-worker-lease must be positive, got %s", *workerLease)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/", httpapi.New(deps.Jobs,
 		httpapi.WithParents(deps.Parents),
-		httpapi.WithArtifacts(deps.Artifacts)).Handler())
+		httpapi.WithArtifacts(deps.Artifacts),
+		httpapi.WithWorkers(deps.Workers, httpapi.WorkerOptions{Lease: *workerLease})).Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprintln(w, "ok")

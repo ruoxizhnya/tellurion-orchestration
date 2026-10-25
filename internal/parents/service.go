@@ -212,6 +212,173 @@ func (s *Service) load(ctx context.Context, parentID string, want queue.ParentKi
 	return parent, nil
 }
 
+// SyncSummary 从**已入队**的子 run 重算父汇总并写回（worker 上报结论后由
+// HTTP 层调用，X5b 的「真实写回」）。
+//
+// 与 ApplyBatchSummary 的区别：后者要调用方逐条交结论；这里直接读子 run 的
+// 两轴（生命周期 + K9），因为 worker 已经通过 JobQueue 把结论写进了
+// `run.backtest_jobs`。**不解析结果内容**，Score 一律为空（排名不在这里猜）。
+//
+// 三条判据：
+//   - 子 run 必须齐全：少一条即拒绝（漏报不得被当成已完成）；
+//   - `cancelled` 是终态但不是 K9 结论：按 failed 计入父汇总（否则父记录会
+//     永远停在 running——子 run 不会再上报第二次）。不新增第四态；
+//   - 已终态且计数 / 明细未变的父记录不重写：重复上报同一条子 run 不得刷新
+//     `completed_at`。
+func (s *Service) SyncSummary(ctx context.Context, parentID string) (*queue.ParentRecord, error) {
+	parent, err := s.store.GetParent(ctx, parentID)
+	if err != nil {
+		return nil, err
+	}
+	lister, ok := s.jobs.(queue.ParentChildLister)
+	if !ok {
+		return nil, fmt.Errorf("parents: JobQueue %T cannot list children (ParentChildLister)", s.jobs)
+	}
+	rows, err := lister.ListChildren(ctx, parentID)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		counts plan.Counts
+		status plan.ParentStatus
+		detail []byte
+	)
+	switch parent.Kind {
+	case queue.ParentBatch:
+		outcomes, err := batchOutcomes(parent, rows)
+		if err != nil {
+			return nil, err
+		}
+		summary, err := plan.AggregateBatch(outcomes, parent.Total)
+		if err != nil {
+			return nil, err
+		}
+		counts, status = summary.Counts, summary.Status
+		detail, err = json.Marshal(summary)
+		if err != nil {
+			return nil, fmt.Errorf("parents: marshal batch summary: %w", err)
+		}
+	case queue.ParentWalkForward:
+		legs, err := walkForwardLegs(parent, rows)
+		if err != nil {
+			return nil, err
+		}
+		summary, err := plan.AggregateWalkForward(legs, parent.Total)
+		if err != nil {
+			return nil, err
+		}
+		counts, status = summary.Counts, summary.Status
+		detail, err = json.Marshal(summary)
+		if err != nil {
+			return nil, fmt.Errorf("parents: marshal walkforward summary: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("%w: parent %s has unknown kind %q", queue.ErrInvalidInput, parentID, parent.Kind)
+	}
+
+	if parent.Terminal() && parent.Status == status &&
+		parent.Completed == counts.Completed && parent.Invalid == counts.Invalid &&
+		parent.Failed == counts.Failed && len(parent.SummaryJSON) > 0 {
+		return parent, nil
+	}
+	return s.store.SaveParentSummary(ctx, parentID, s.summaryOf(counts, status, detail))
+}
+
+func batchOutcomes(parent *queue.ParentRecord, rows []*queue.RunRecord) ([]plan.TaskOutcome, error) {
+	if len(rows) != parent.Total {
+		return nil, fmt.Errorf("parents: parent %s has %d queued children for %d planned tasks",
+			parent.ID, len(rows), parent.Total)
+	}
+	out := make([]plan.TaskOutcome, len(rows))
+	for i, row := range rows {
+		out[i] = taskOutcomeOf(row)
+	}
+	return out, nil
+}
+
+// parentPlanShape 只解析 plan_canonical 里「子 run 顺序 → 窗口 / 段」的映射。
+// 它是父计划身份的一部分（提交时已冻结），不是第二份真相。
+type parentPlanShape struct {
+	Children []struct {
+		Kind   string `json:"kind"`
+		Index  int    `json:"index"`
+		Window *struct {
+			Index int `json:"index"`
+		} `json:"window"`
+	} `json:"children"`
+}
+
+func walkForwardLegs(parent *queue.ParentRecord, rows []*queue.RunRecord) ([]plan.LegOutcome, error) {
+	var shape parentPlanShape
+	if err := json.Unmarshal([]byte(parent.PlanCanonical), &shape); err != nil {
+		return nil, fmt.Errorf("parents: parent %s plan_canonical is not decodable: %w", parent.ID, err)
+	}
+	if len(shape.Children) != parent.Total*2 {
+		return nil, fmt.Errorf("parents: parent %s plan has %d children for %d windows",
+			parent.ID, len(shape.Children), parent.Total)
+	}
+	if len(rows) != len(shape.Children) {
+		return nil, fmt.Errorf("parents: parent %s has %d queued children for %d planned legs",
+			parent.ID, len(rows), len(shape.Children))
+	}
+	legs := make([]plan.LegOutcome, len(rows))
+	for i, row := range rows {
+		child := shape.Children[i]
+		if child.Index != i+1 {
+			return nil, fmt.Errorf("parents: parent %s child %d has plan index %d (order mismatch)",
+				parent.ID, i+1, child.Index)
+		}
+		if child.Window == nil || child.Window.Index < 1 {
+			return nil, fmt.Errorf("parents: parent %s child %d has no window", parent.ID, i+1)
+		}
+		kind := plan.LegKind(child.Kind)
+		if kind != plan.LegTrain && kind != plan.LegTest {
+			return nil, fmt.Errorf("parents: parent %s child %d has unknown leg %q", parent.ID, i+1, child.Kind)
+		}
+		outcome := taskOutcomeOf(row)
+		legs[i] = plan.LegOutcome{
+			Window:       child.Window.Index,
+			Kind:         kind,
+			RunID:        outcome.RunID,
+			ResultStatus: outcome.ResultStatus,
+			Error:        outcome.Error,
+			DurationMs:   outcome.DurationMs,
+		}
+	}
+	return legs, nil
+}
+
+// taskOutcomeOf 把一行子 run 折成汇总输入。
+//
+// 两轴不合并：ResultStatus 只在有 K9 结论时才有值。`cancelled` / 无结论的
+// `failed` 都是终态，按 failed 计入（否则父汇总永远等一个不会来的回报）。
+func taskOutcomeOf(row *queue.RunRecord) plan.TaskOutcome {
+	status := row.ResultStatus
+	errMsg := row.ErrorMessage
+	if status == "" {
+		switch row.Status {
+		case queue.RunCancelled:
+			status = queue.ResultFailed
+			if errMsg == "" {
+				errMsg = "cancelled"
+			}
+		case queue.RunFailed:
+			status = queue.ResultFailed
+		}
+	}
+	var ms int64
+	if !row.StartedAt.IsZero() && row.CompletedAt.After(row.StartedAt) {
+		ms = row.CompletedAt.Sub(row.StartedAt).Milliseconds()
+	}
+	return plan.TaskOutcome{
+		RunID:        row.ID,
+		ResultStatus: status,
+		Error:        errMsg,
+		DurationMs:   ms,
+	}
+}
+
 // summaryOf 把 plan.Counts / ParentStatus 映射成落库形状（唯一映射点）。
 func (s *Service) summaryOf(counts plan.Counts, status plan.ParentStatus, detail json.RawMessage) queue.ParentSummary {
 	out := queue.ParentSummary{
