@@ -115,6 +115,12 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨（④ = R8 / R9；⑤ = R1
 > **门禁（真实输出）**：`gofmt -l .` 空；`go build ./...` 退出 0；`go vet ./...` 退出 0；`go test ./... -count=1` 全绿（`cmd/orchestrationservice 0.275s`、`internal/httpapi 0.249s`、`internal/parents 0.105s`、`internal/pgstore 0.143s`、`internal/plan 0.095s`、`internal/queue 0.117s`）。本机 `127.0.0.1:5432` 未监听（`Test-NetConnection` = False）⇒ PG 腿全部 **skip**，不是通过；本机 `-race` 仍跑不了（`CGO_ENABLED=0`、无 C 编译器）。
 > **未落（如实）**：① `run_artifacts` 的**生产者**（core 引擎在日循环前写留痕；本仓零 import core，不能代替）；② worker 进程与 worker 端点；③ 子 run 入队（`parent_job_id` 的写入方，父 GET 的 `children` 因此通常为空）；④ 鉴权（R5 / 裁-15 缓做）。**验收对照（本单 ⑤ ③）**：「provenance 端点返回三 hash」**读面已达成**（两条破坏验证钉住），端到端达成仍要等生产者接线。
 >
+> **裁-19 定稿（2026-10-25）：本仓 `/provenance` 在 worker 落地前不作为生产读面。**
+> 三 hash 由 core 引擎计算，core 有权威表 `quant.run_provenance`；本仓的 `run_artifacts` 重新定义为「**worker 写的投影**」——生产者是未来的 worker（执行完从 core 响应写入），**core 不做双写**。因此：
+> - 生产读面 = core 新增的 `GET /api/backtest/{id}/provenance`（core QT-72，读 `quant.run_provenance ⋈ backtest_jobs`）；
+> - 本仓 `GET /api/runs/{id}/provenance` 与父 GET 的三 hash 字段保留（施工 ⑨ 成果不回滚），但文档/响应须让运维看出 **`producer_pending`**——「查不到」不等于「run 不存在」；
+> - worker 落地时由 worker 写入 `run_artifacts`，并用 `saveArtifactSQL` 已有的「13 项身份全等否则 0 行受影响」语义做对拍；**不引入第二个写者**。
+>
 > **⚠️ 工单 G7 的两条验收前提被源码证伪（2026-10-23 实测，如实登记，不当已完成）**：
 > 1. **「`pkg/backtest` 里 `job|batch|walkforward` 零命中」不是本仓能产出的判据**：core `pkg/backtest` 实测 **1032 处命中 / 39 个文件**（`job/job.go` 207、`batch/batch.go` 67、`walkforward/walkforward.go` 34、`aliases.go` 39…）。达成它要的是 core 侧 O3（`tellurion:docs/design/qt-decoupling/orchestration-service-design.md` §7「编排层整体移出 `pkg/backtest`」），而 R1 与本仓 `db-schema.md` §5 冻结的路径是「双写 → 对拍 → 切读 → 停写」——旧路径在 O0 切换前**必须继续服务**。本仓能做的是把 durable 侧与 port 做出来，不能单方面让别人的包变空。
 > 2. **「同一 batch 在服务与旧路径结果一致」与同一张工单的第 2 步自相矛盾**：core 的 batch 只要 `err == nil` 就记 `completed`、从不读 `resp.Status`（`core:pkg/backtest/batch/batch.go:249`），`toBacktestResult` 又把 status 字段丢掉（`:412-446`），于是 K9 `invalid` 被算进 `completed` / `success_count` / 评分均值；工单第 2 步又要求「批量报告不得把 `invalid` 当成功」。**修掉它的代价就是数字不再与旧路径相同**。本仓按「必须相同的部分（网格展开、窗口集合、逐 run 请求派生）钉一致，故意不同的部分（三值计数、失败窗口显式计数）钉分歧」执行，并在 X5b 的验收里逐条写明哪条是哪种。
@@ -148,7 +154,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨（④ = R8 / R9；⑤ = R1
 | X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① `internal/queue` 语义；② jobs 4 端点 HTTP 面；③ **DDL 已接 PG + 启动迁移 + 双实现共享用例**；④ R8 回收出口 + R9 `ClaimByKernel` 落两个实现）| `QT-44` | 本仓立项 |
 | X5b | batch + walkforward（窗口切分与汇总）🔶 规划与汇总纯函数 + 共享套件（2026-10-24 施工 ⑥）+ **父表 / 子 run 关系 / 提交与汇总落库（2026-10-25 施工 ⑦，裁-13）** + **父作业 HTTP 2 端点（2026-10-25 施工 ⑧，`POST/GET /api/runs/parents`）**；**子 run 入队 / worker 执行未落** | `QT-44` | X5a |
 | X5c | worker 注册 / 心跳 / `drain` / 心跳超时 🔶（施工 ① 内存；③ PG 已落；⑤ 心跳超时→`offline` 两个实现同批 + `cmd` 接线；worker 进程本身未做） | `QT-44` | X5a |
-| X0 | `run_artifacts` 三 hash 留痕 + `/provenance` 🔶（施工 ⑨：`ArtifactStore` 写入端口 + 内存 / PG 两个实现、`GET /api/runs/{id}/provenance` 三态、父 GET 逐子三 hash；**生产者（core 引擎写入方）未落**）| `QT-03` | X5a |
+| X0 | `run_artifacts` 三 hash 留痕 + `/provenance` 🔶（施工 ⑨：`ArtifactStore` 写入端口 + 内存 / PG 两个实现、`GET /api/runs/{id}/provenance` 三态、父 GET 逐子三 hash；**生产者（core 引擎写入方）未落**）。**裁-19 定稿（2026-10-25）**：生产读面改为 **core** `GET /api/backtest/{id}/provenance`（core QT-72）；本仓端点保持 `producer_pending`，`run_artifacts` = worker 写的投影，core 不双写 | `QT-03` | X5a |
 
 ## 二、跨仓指针（不在本仓，勿双写）
 
