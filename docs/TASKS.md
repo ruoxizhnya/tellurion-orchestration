@@ -43,7 +43,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 - **③ 要求**：contracts 新增 orchestration 任务/租约/结果/artifact 形状；本仓与 core 改为 `require` 版本；引 kit `v0.1.4` 做 service token 鉴权（裁-15 的触发条件已满足：服务对外发布）；公开 `/healthz` 保持无鉴权。
 - **④ 约束与非目标**：不改变任务状态机语义；不把结果解释搬进本仓；不做用户 JWT。
 - **⑤ 验收**：core/本仓无本地重复 DTO；service token 可调用；错误码闭合；`go.mod` 同时含 contracts + kit。
-- **⑥ 边界**：只改本仓与 contracts 的接口层；core 客户端改造归 **`SVC-CORE-RUN-RETIRE`** 跟踪——⚠️ 该 ID 今天**只有名字没有六字段单**：core 台账 `docs/TASKS.md:24` 列名 + 机械判据正文在 `tellurion:docs/design/qt-decoupling/core-governance-decision-materials-2026-10-26.md` §4.2，core 台账 `:26` 明写「七个退役 ID 不再各自立单」。判据见彼处，真立单前不宣称退役可执行。
+- **⑥ 边界**：只改本仓与 contracts 的接口层；core 客户端改造归 **`SVC-CORE-RUN-RETIRE`** 跟踪——条目**已在 core 立单**（2026-10-26 同日补，`tellurion:docs/TASKS.md:121`「六之二、退役执行单」，串行第 5；判据逐字抄 B 组材料 §4.2）。基线数会随施工漂移，开工时当场重跑。
 
 > **⛔ 开工前置复核（2026-10-26，未开工）**：`go.mod` 只有 `github.com/jackc/pgx/v5 v5.7.3`，**无 contracts / kit**；contracts 侧**无编排形状包、无对应立单**。不得在本仓自造 claim / `run_artifacts` 结构（会变成第三份 DTO）。contracts 形状 + kit `v0.1.4` 升 pin 属跨仓腿，报协调者。
 
@@ -54,9 +54,11 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 - **③ 要求**：定死「任务面归 run、结果面归 core」；core analysis 的异步入口改调本仓；worker 只上报结果；迁移存量行；删 core `pkg/backtest/job` / `batch` 的本地队列写路径；UI/openapi 同步。
 - **④ 约束与非目标**：不重算指标；不改 run 三值状态；不把订单/持仓搬进 `run`。
 - **⑤ 验收**：core `pkg/backtest` 对本仓的引用符合契约；core 裸表 `backtest_jobs` 零新增；同批 run 新旧路径结果一致；`X5b` 关闭。
-- **⑥ 边界**：本仓只保证任务域；core 代码删除归 **`SVC-CORE-RUN-RETIRE`** 跟踪（该 ID 只有名字没有六字段单：core 台账 `:24` 列名 + B 组材料 §4.2 的机械判据；core `:26` 明写不再各自立单）。
+- **⑥ 边界**：本仓只保证任务域；core 代码删除归 **`SVC-CORE-RUN-RETIRE`** 跟踪（条目已在 core `docs/TASKS.md:121`「六之二」立单，串行第 5，判据 = B 组材料 §4.2）。
 
 > **⛔ 开工前置复核（2026-10-26，未开工）**：等 B 组 `SVC-CORE-RUN-RETIRE` 立单；本仓台账仍未落的 `run_artifacts` 生产者（写端点 + R5 鉴权）、worker 进程/端点、子 run 入队均依赖前置 2（contracts 编排形状）。本轮未自造 wire 形状，未改 worker 语义。
+>
+> ⚠️ **本行三处已于同日实测订正（2026-10-26 账实核对）**：① `SVC-CORE-RUN-RETIRE` **已立单**——`tellurion:docs/TASKS.md:121`「六之二」，串行第 5，所以它不再是本单的阻塞前置；② **「子 run 入队」已落**——`internal/parents/service.go:143` 的 `enqueueChildren` 是 `run.backtest_jobs.parent_job_id` 的唯一写入方（`:148` 填 `ParentJobID`），本文件 G3 ① 自己也记了 ✅（2026-10-25），把它列进「未落」是自相矛盾；③ 真正未落的三条**复核后仍成立**：`internal/httpapi/` 下**没有** `auth.go` / `policy.go`（R5 鉴权未接）、**没有** `POST …/artifacts` 路由（只有 `GET …/provenance` 读面），worker 进程在 core（`tellurion:cmd/worker`）而非本仓。⇒ 本单的剩余前置是 **contracts 编排形状（`CT-04`）+ R5 + artifact 写端点**，不是「等退役单」。
 
 ### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] 🔶
 
