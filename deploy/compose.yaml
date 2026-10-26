@@ -1,0 +1,26 @@
+# tellurion-orchestration · 单仓本地运行（ADR-036 G0）
+# 用法：docker compose -f deploy/compose.yaml up --build
+# 依赖：本机或容器可达的 PostgreSQL（默认 host.docker.internal:5432）。
+# DSN 为空时本服务按设计拒绝启动（fail-closed）。
+name: tellurion-orchestration
+
+services:
+  orchestration:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: tellurion-orchestration:dev
+    command: ["-addr", "0.0.0.0:8088"]
+    ports:
+      - "127.0.0.1:8088:8088"
+    environment:
+      ORCHESTRATION_DSN: ${ORCHESTRATION_DSN:-postgres://postgres:postgres@host.docker.internal:5432/tellurion?sslmode=disable}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/healthz"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    restart: unless-stopped

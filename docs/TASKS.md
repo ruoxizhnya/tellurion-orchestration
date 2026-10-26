@@ -19,6 +19,43 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 
 > **约定变更（2026-10-21）**：原「占位仓不写正式六字段任务单」作废——X 线任务单已展开为本仓正式任务（见下）。M5/M8 开工前置不变；实现仍未开工，开工前仍须过前置两条。
 
+### SVC-ORCH-G0 · 服务就绪门 G0：自有部署与本地启动（ADR-036）[P0] ✅（2026-10-26）
+
+- **① 目标**：本仓作为运行编排控制面，能独立构建、启动、被健康检查；DSN 为空时仍 fail-closed。
+- **② 上下文**：ADR-036 定本仓为服务；今天有 `cmd/orchestrationservice` + `run.*` 6 表 + `/healthz`，但无 `Dockerfile` / `deploy/`，且 `go.mod` 只有 pgx（无 contracts/kit）。
+- **③ 要求**：新增 `Dockerfile`（多阶段、非 root、`curl`、`HEALTHCHECK /healthz`）；新增 `deploy/compose.yaml`（`ORCHESTRATION_DSN` 必填；端口 `:8088`）；补 `config/` 或 env 说明；README 写单仓启动命令。
+- **④ 约束与非目标**：不改队列语义；不接 core 任务切读（G3）；不引入 K8s；不在 G0 阶段做鉴权（G1）。
+- **⑤ 验收**：`docker compose -f deploy/compose.yaml config` 通过；无 DSN 启动失败；有 DSN 启动后 `GET /healthz` 200；无 `replace` / `go.work`。
+- **⑥ 边界**：只改本仓 deployment；core worker 客户端由 `SVC-ORCH-G3` 跟踪。
+
+> **施工记录（2026-10-26）**：
+> - **落点**：`Dockerfile`（多阶段、非 root、`curl`、`HEALTHCHECK curl -fsS http://127.0.0.1:8088/healthz`）、`deploy/compose.yaml`（服务名 `orchestration`、`ORCHESTRATION_DSN`、`:8088`）；`cmd/orchestrationservice/main.go` 默认 `-addr` 保持 `127.0.0.1:8088`、`"/healthz"` 路由改为常量引用（可被文档 grep 锚定）；README 补直跑与 compose 启动命令。
+> - **验收（真实输出）**：`docker compose -f deploy/compose.yaml config -q` → exit 0；`git ls-files Dockerfile deploy/` 非空；`rg -n '"/healthz"' cmd/orchestrationservice/main.go` → 1 行（`:135`）；`go build ./...` / `go vet ./...` / `go test ./... -count=1` 全绿（5 个测试包 + 4 个无测试包）；`gofmt -l .` 空。
+> - **破坏验证**：临时给 `orchestration` 加 `depends_on: missing-svc` → `config -q` 退出 1（`service "orchestration" depends on undefined service "missing-svc"`）→ 逐字节还原后复绿（exit 0，SHA256 一致）。
+> - **如实登记**：未改队列/worker 语义；`go.mod` 仍只有 pgx，未引 contracts / kit；`run_artifacts` 生产者与子 run 入队等仍属 G3。
+
+### SVC-ORCH-G1 · 契约化与鉴权（ADR-036 G1）[P0] ⛔（2026-10-26 复核：无契约形状）
+
+- **① 目标**：本仓的 wire 形状进 contracts，服务间调用用 kit service token，不再靠 core/本仓各写一份 DTO。
+- **② 上下文**：今天 `go.mod` 只有 pgx；core `internal/orchestrationworker` 与本仓各写一套 claim/job 结构。
+- **③ 要求**：contracts 新增 orchestration 任务/租约/结果/artifact 形状；本仓与 core 改为 `require` 版本；引 kit `v0.1.4` 做 service token 鉴权（裁-15 的触发条件已满足：服务对外发布）；公开 `/healthz` 保持无鉴权。
+- **④ 约束与非目标**：不改变任务状态机语义；不把结果解释搬进本仓；不做用户 JWT。
+- **⑤ 验收**：core/本仓无本地重复 DTO；service token 可调用；错误码闭合；`go.mod` 同时含 contracts + kit。
+- **⑥ 边界**：只改本仓与 contracts 的接口层；core 客户端改造由 `SVC-CORE-RUN-RETIRE` 跟踪。
+
+> **⛔ 开工前置复核（2026-10-26，未开工）**：`go.mod` 只有 `github.com/jackc/pgx/v5 v5.7.3`，**无 contracts / kit**；contracts 侧**无编排形状包、无对应立单**。不得在本仓自造 claim / `run_artifacts` 结构（会变成第三份 DTO）。contracts 形状 + kit `v0.1.4` 升 pin 属跨仓腿，报协调者。
+
+### SVC-ORCH-G3 · core 任务面切换与旧 job 实现退役（ADR-036）[P0] ⛔（2026-10-26 复核：等 B 组退役单）
+
+- **① 目标**：core 所有异步任务创建走本仓；core `pkg/backtest/job` / `batch` 的旧写路径退役；`X5b` 关闭。
+- **② 上下文**：core 仍可直跑并写裸表 `backtest_jobs`；`cmd/worker` 从本仓领活后又写回 core `backtest_jobs`；两套任务真相并存。
+- **③ 要求**：定死「任务面归 run、结果面归 core」；core analysis 的异步入口改调本仓；worker 只上报结果；迁移存量行；删 core `pkg/backtest/job` / `batch` 的本地队列写路径；UI/openapi 同步。
+- **④ 约束与非目标**：不重算指标；不改 run 三值状态；不把订单/持仓搬进 `run`。
+- **⑤ 验收**：core `pkg/backtest` 对本仓的引用符合契约；core 裸表 `backtest_jobs` 零新增；同批 run 新旧路径结果一致；`X5b` 关闭。
+- **⑥ 边界**：本仓只保证任务域；core 代码删除由 `SVC-CORE-RUN-RETIRE` 跟踪。
+
+> **⛔ 开工前置复核（2026-10-26，未开工）**：等 B 组 `SVC-CORE-RUN-RETIRE` 立单；本仓台账仍未落的 `run_artifacts` 生产者（写端点 + R5 鉴权）、worker 进程/端点、子 run 入队均依赖前置 2（contracts 编排形状）。本轮未自造 wire 形状，未改 worker 语义。
+
 ### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] 🔶
 
 > **迁入说明（2026-10-21）**：本单自 core 仓 `tellurion:docs/TASKS.md`「五、X 线」迁入（任务台账批量重分布：X 线单展开到各服务仓为正式六字段单，「占位仓不写正式任务单」旧约定同时作废）。六字段正文逐字保留、不改写；core 侧同号条目已改为指针。
@@ -74,7 +111,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 > **落点**：`internal/plan`（纯函数，零第三方依赖）——`ExpandBatch`（网格笛卡尔积 + `strategy_params` 浅合并）、`SplitWindows` / `ExpandWalkForward`（交易日切窗 + 只改 `start_date` / `end_date` 派生 train/test）、`AggregateBatch` / `AggregateWalkForward`（三值计数、排名、父状态）；`internal/plansuite`（**共享套件**：7 条用例同时跑在 batch 与 walkforward 两个 Subject 上）。
 > **口径（写进代码注释，不是口头约定）**：① batch 参数名按字典序、最后一个参数变化最快，展开上限 100（与 core REV-11 同值），空网格 / 空取值 / 非标量 / 尾随内容 / 超限 → `ErrInvalidRequest`（HTTP 层映射 `invalid_params`）；② walkforward 只生成**完整**窗口（train/test 各按交易日数），`step_days` 必须为正，日历必须严格递增（不偷偷排序），train/test 首尾相接不重叠，`min_train_days` 空 = `train_days/2`（固定窗口下恒成立）；③ 子 run 只改日期，kernel / fill_timing / seed / strategy_params / strategy_ref 原样保留；④ 汇总三值分开（`invalid` **不得**算成 `completed`），batch 必须传计划总数且与逐条回报数一致（漏报即拒），walkforward 缺段 / 缺窗算 pending；只对 `completed` 且给出有限 score 的子 run 排名（同分按 `run_id` 升序），`invalid` / `failed` 保留但 `rank=0`；⑤ 父状态：还有未回报 → `running`，任一 failed → `failed`（**不吞**子失败），否则 `completed`（`invalid` 不拖成 failed）。
 > **R6 裁决（2026-10-25，裁-13）**：建**一张** `run.parent_jobs` 父表（`kind ∈ {batch, walkforward}`、`plan_canonical` / `plan_hash`、三值汇总列、父状态），`run.jobs` 加**可空 `parent_job_id` 列 + 索引**表达子 run 关系；**不塞 `request_json`**（`request_canonical` 锚点已证明 JSONB 不能当身份），**不建两张实体表**（两种父共用一套生命周期，共享套件 `internal/plansuite` 已在钉「不各写一套」）。上一行「不建第六张表、不写父行」是 R6 未裁时的处置，**由本裁决取代**；表/端点/子 run 入队/worker 执行仍未落，见批次四 W3。
-> **裁-15（2026-10-25）：本仓鉴权暂不做**。客户端是 worker（注册 / 心跳 / 领取），上用户 JWT 等于要给 worker 发凭证，是新的失败面；默认监听 `127.0.0.1:8088` 已回环。**触发条件（任一）**：worker 跨主机 / 服务对外发布 / 引入外部提交方——届时上**服务间凭证**（service token），不复用用户 JWT。
+> ~~**裁-15（2026-10-25）：本仓鉴权暂不做**~~ → **触发条件已满足**（ADR-036 把本仓定为对外服务；G0 compose 会绑 `0.0.0.0:8088`）。**鉴权归 `SVC-ORCH-G1`**：上 service token（不复用用户 JWT），`/healthz` 保持公开。裁-15 原文保留作历史。
 > **套件计数**（`go test -v` 实测，不手数）：`internal/plan` 22 个顶层用例 / 53 条含子测试；共享套件在每个 Subject 上 7 条（`PlanIsDeterministic` / `EveryChildIsACompleteRunSpec` / `SummaryCountsThreeValuesWithoutCollapsing` / `InvalidIsNotAFailure` / `AnyFailureFailsTheParent` / `AllFailuresAreNotAnEmptySuccess` / `PendingKeepsTheParentRunning`）。**X5c 复核**：内存腿的 `ReapOfflineMarksStaleWorkersOffline` / `ReapOfflineRejectsNonPositiveTimeout` / `OfflineWorkerRevivesOnProofOfLifeUnlessDrained` / `OfflineWorkerIsNotDispatchedUntilProofOfLife` 全绿；PG 腿仍因本机无库 `skip`（施工 ⑤ 已如实登记，不是本轮新增缺口）。
 > **破坏验证（四条腿，改坏 → 红 → 逐字节还原 → 绿）**。还原用 sha256 比对（`internal/plan/batch.go` = `ab51cd70…`、`internal/plan/walkforward.go` = `c3d33894…`、`internal/plan/aggregate.go` = `86cfd1c8…`，每条腿跑完都验一次还原相同）：
 > 1. **batch：丢掉网格值合并**（`merged[k] = v` 那一行改成空操作）→ `TestExpandBatchMergesGridAndKeepsBaseParams` 红：`child 1 lookback = 20, want 10`。

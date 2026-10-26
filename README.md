@@ -30,6 +30,17 @@ go test ./...
 
 本仓**单独 checkout 就能跑通**上面三条。需要别的仓源码才过 → 边界错了，不是加 `replace` 能解决的问题。
 
+跑起来：
+
+```bash
+# 本机直跑（DSN 必填；空 DSN 按设计 fail-closed 拒绝启动）
+ORCHESTRATION_DSN='postgres://postgres:postgres@127.0.0.1:5432/tellurion?sslmode=disable' \
+  go run ./cmd/orchestrationservice -addr 127.0.0.1:8088
+
+# 或容器（单仓 compose；PG 默认 host.docker.internal:5432）
+docker compose -f deploy/compose.yaml up --build
+```
+
 ## 边界
 
 **可以**：job / batch / walkforward 的编排与重试；持有 `run` schema 的 job 元数据；按算力配额分片调度

@@ -364,7 +364,7 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | `cmd/orchestrationservice/main.go` | 进程装配：`-dsn`/`ORCHESTRATION_DSN`（两者都空即拒绝启动）→ `Migrate` → 监听（`127.0.0.1:8088`，jobs 4 端点 + `/healthz`）+ 周期回收（`-reap-interval` 默认 30s：租约 `ReapExpired` + 心跳 `ReapOffline`，后者由 `-heartbeat-timeout` 默认 90s 控制，0 = 关闭；开启时装配期 fail-closed 检查注册表确实实现了 `WorkerReaper`） | §9.5 建表入口、`dataflow.md` §2 第 7/8 步 |
 | `internal/pgstore/*_test.go` | PG 专属腿：迁移幂等 + 表/索引形状、列清单双向核对、`CHAR(64)` 补齐、三条库约束（唯一索引 / 两个 CHECK / FK）、租约谓词、`request_canonical` 锚点、并发领取不重发 | 破坏验证的落点 |
 
-**PG 侧口径（施工 ③）**：① 时间一律由**应用侧** UTC 时钟提供（`ReapExpired` 的签名本来就收 `now`；内存实现同样如此），不用 DB 的 `now()`——混用会让「租约是否过期」在一次调用里有两个答案；代价是跨进程时钟漂移直接移动租约边界，部署必须让 worker 与 PG 同时钟源。② 读路径的 `RequestJSON` 取 `request_canonical`（TEXT 锚点），`request_json`（JSONB）只作查询投影。③ 端口 `8088` 是本仓自定的监听地址（`-addr` 可覆盖），不在任何跨仓契约里；⚠️ 同期兄弟仓的 `cmd` 默认值有撞号（strategy `:8085` = core 的 analysis-service，risk `:8086` = ai-service，analytics `:8087`），登记在此、属跨仓问题，不由本仓单方面改别人的默认值。
+**PG 侧口径（施工 ③）**：① 时间一律由**应用侧** UTC 时钟提供（`ReapExpired` 的签名本来就收 `now`；内存实现同样如此），不用 DB 的 `now()`——混用会让「租约是否过期」在一次调用里有两个答案；代价是跨进程时钟漂移直接移动租约边界，部署必须让 worker 与 PG 同时钟源。② 读路径的 `RequestJSON` 取 `request_canonical`（TEXT 锚点），`request_json`（JSONB）只作查询投影。③ 端口 `8088` 是本仓自定的监听地址（`-addr` 可覆盖），不在任何跨仓契约里；⚠️ 原撞号（strategy `:8085` = core 的 analysis-service，risk `:8086` = ai-service）已由 **ADR-036（2026-10-26）** 分配为 strategy `:8090` / risk `:8089` / analytics `:8087` / broker `:8091`，本地可并行起。
 
 **施工 ③ 的三条实测**（都是先红后修出来的，不是设计时想到的）：
 1. `UPDATE … FROM (SELECT … FOR UPDATE SKIP LOCKED) RETURNING id, …` 里的裸 `id` 是**歧义列**（外层 `j` 与子查询 `c` 都有），PG 直接报 42702 → 列清单改为从 `jobCols` 派生带别名的版本。

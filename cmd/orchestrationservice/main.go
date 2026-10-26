@@ -132,12 +132,13 @@ func run() error {
 		return fmt.Errorf("-worker-lease must be positive, got %s", *workerLease)
 	}
 
+	const healthzPath = "/healthz"
 	mux := http.NewServeMux()
 	mux.Handle("/", httpapi.New(deps.Jobs,
 		httpapi.WithParents(deps.Parents),
 		httpapi.WithArtifacts(deps.Artifacts),
 		httpapi.WithWorkers(deps.Workers, httpapi.WorkerOptions{Lease: *workerLease})).Handler())
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET "+healthzPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprintln(w, "ok")
 	})
