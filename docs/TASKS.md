@@ -11,6 +11,8 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 > 每张单六字段（① 目标 ② 上下文 ③ 要求 ④ 约束与非目标 ⑤ 验收 ⑥ 边界），判据见 `tellurion:AGENTS.md` §8.5。
 > 完成即标 ✅（附日期）并移入 `docs/archive/TASKS-YYYY-MM-DD-archived.md`；本文件只留未完成项。
 
+> **环境口径（2026-10-26 复测，统一出处）**：本文件多处写「本机 `127.0.0.1:5432` 未监听 ⇒ PG 腿 skip」「本机 `-race` 跑不了」——**两条今天仍成立**（`netstat -ano` 里 5432 零条监听；`CGO_ENABLED=0`）。但**「本机无 Go」不成立**：Go 1.25.14 已装，只是不在默认 Git Bash 的 PATH，`export PATH="/c/Users/ruoxi/AppData/Local/Programs/go1.25.14/bin:$PATH"` 后 build/vet/test 可本机复跑。以前者为准的 skip 登记不许顺手写成「无工具链」，全组统一表见 `tellurion:docs/design/qt-decoupling/cross-repo-decision-record-2026-10-26.md` §三。
+
 > **第三轮裁决指针（2026-10-25）**：⑱ X0 生产者 = **本仓新增 artifact 写端点**（`POST /api/runs/jobs/{id}/artifacts`，service 角色），core worker 调它、**不直写库**；幂等沿用 `queue.ArtifactStore.SaveArtifact`；**前置 = 本仓先做 R5 鉴权**（kit + policy）。DR⑬ 的 `producer_pending` 响应提示位并入本条。正文见 `tellurion:docs/design/qt-decoupling/cross-repo-decision-record-2026-10-25.md` §五。
 
 ---
@@ -41,7 +43,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 - **③ 要求**：contracts 新增 orchestration 任务/租约/结果/artifact 形状；本仓与 core 改为 `require` 版本；引 kit `v0.1.4` 做 service token 鉴权（裁-15 的触发条件已满足：服务对外发布）；公开 `/healthz` 保持无鉴权。
 - **④ 约束与非目标**：不改变任务状态机语义；不把结果解释搬进本仓；不做用户 JWT。
 - **⑤ 验收**：core/本仓无本地重复 DTO；service token 可调用；错误码闭合；`go.mod` 同时含 contracts + kit。
-- **⑥ 边界**：只改本仓与 contracts 的接口层；core 客户端改造由 `SVC-CORE-RUN-RETIRE` 跟踪。
+- **⑥ 边界**：只改本仓与 contracts 的接口层；core 客户端改造归 **`SVC-CORE-RUN-RETIRE`** 跟踪——⚠️ 该 ID 今天**只有名字没有六字段单**：core 台账 `docs/TASKS.md:24` 列名 + 机械判据正文在 `tellurion:docs/design/qt-decoupling/core-governance-decision-materials-2026-10-26.md` §4.2，core 台账 `:26` 明写「七个退役 ID 不再各自立单」。判据见彼处，真立单前不宣称退役可执行。
 
 > **⛔ 开工前置复核（2026-10-26，未开工）**：`go.mod` 只有 `github.com/jackc/pgx/v5 v5.7.3`，**无 contracts / kit**；contracts 侧**无编排形状包、无对应立单**。不得在本仓自造 claim / `run_artifacts` 结构（会变成第三份 DTO）。contracts 形状 + kit `v0.1.4` 升 pin 属跨仓腿，报协调者。
 
@@ -52,7 +54,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 - **③ 要求**：定死「任务面归 run、结果面归 core」；core analysis 的异步入口改调本仓；worker 只上报结果；迁移存量行；删 core `pkg/backtest/job` / `batch` 的本地队列写路径；UI/openapi 同步。
 - **④ 约束与非目标**：不重算指标；不改 run 三值状态；不把订单/持仓搬进 `run`。
 - **⑤ 验收**：core `pkg/backtest` 对本仓的引用符合契约；core 裸表 `backtest_jobs` 零新增；同批 run 新旧路径结果一致；`X5b` 关闭。
-- **⑥ 边界**：本仓只保证任务域；core 代码删除由 `SVC-CORE-RUN-RETIRE` 跟踪。
+- **⑥ 边界**：本仓只保证任务域；core 代码删除归 **`SVC-CORE-RUN-RETIRE`** 跟踪（该 ID 只有名字没有六字段单：core 台账 `:24` 列名 + B 组材料 §4.2 的机械判据；core `:26` 明写不再各自立单）。
 
 > **⛔ 开工前置复核（2026-10-26，未开工）**：等 B 组 `SVC-CORE-RUN-RETIRE` 立单；本仓台账仍未落的 `run_artifacts` 生产者（写端点 + R5 鉴权）、worker 进程/端点、子 run 入队均依赖前置 2（contracts 编排形状）。本轮未自造 wire 形状，未改 worker 语义。
 
@@ -205,6 +207,24 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 
 > **⚠️ 开工前置（refactor-plan-review M5/M8，2026-10-20 登记）**：本表任何单开工前，必须先过 core `tellurion:docs/TASKS.md`「五、X 线」的**公共前置**两条：① 建仓/升格前先与 ADR-027 §2 对账（12 仓是上限/当前规划，不是承诺终态）；② 本仓设计文档先写「**接口对表**」小节（签名 + 错误语义 + 版本策略，模板 = `tellurion:docs/design/qt-decoupling/data-service-contract-and-ownership.md` §4.1），**未对表不开工**。正文以彼处为准，此处只留指针、不镜像。
 > **2026-10-22 订正**：原文模板指向 `target-module-topology.md` 的 UnifiedDataPoint 节——该引用在 core 仓是**幻影**（QT-42/QT-43 已实测订正），本仓同步改为 `data-service-contract-and-ownership.md` §4.1。M8 已落 §9（QT-44 侧）；M5 已结案（六仓 ≠ 六进程，本仓今天不升格容器）。
+
+### SVC-ORCH-G2 · 服务就绪门 G2：`run.*` 唯一 writer · artifact 写端点 · 迁移重放（ADR-036）[P0] ⬜
+
+- **① 目标**：`run` schema 六张表满足 ADR-036 §3 的 G2（自有 schema、迁移可重放、**无跨 schema 写**），并把裁决 ⑱ 要求的 artifact **写端点**落出来——它是「唯一 writer」这句话的实现，不是新功能。
+- **② 上下文**：`internal/queue` 有六表 DDL（含 `run.parent_jobs` / `run.run_artifacts`），`internal/pgstore` 是 PG 实现，`cmd/orchestrationservice` 启动即迁移并监听 `:8088`（DSN 为空 fail-closed）；语义套件 `internal/qtest` 每个实现 45 条用例（内存与 PG 同跑）。**缺口**：① `SaveArtifact` 今天**只被测试与编译期断言消费**（本仓台账施工 ⑨ 自证），即 `run_artifacts` 有读面无写者；② 裁决 ⑱ 正文（本文件 `:14`）：「X0 生产者 = **本仓新增 artifact 写端点**（`POST /api/runs/jobs/{id}/artifacts`，service 角色），core worker 调它、**不直写库**；幂等沿用 `queue.ArtifactStore.SaveArtifact`；**前置 = 本仓先做 R5 鉴权**」——这条裁决**没有对应条目**，此前只存在于指针行；③ 鉴权未落（`internal/httpapi` 无 `auth.go` / `policy.go`，`go.mod` 无 kit），故 `SVC-ORCH-G1` ⛔；④ core 仍以裸表 `backtest_jobs` 为状态/结果权威（双 owner，SYSTEM-DESIGN §5）。
+- **③ 要求**：① 迁移重放自证：同一测试库连跑两次 DDL，行数 / `pg_indexes` / 列集指纹逐位不变（`ORCHESTRATION_TEST_DSN` 腿，无库 skip）；② 禁跨 schema 写护栏：静态扫本仓 SQL，只允许 `run.` 的写语句，出现 `quant.` / `market.` / `analysis.` / `risk.` 即红；③ **artifact 写端点**：`POST /api/runs/jobs/{id}/artifacts`，复用 `ArtifactStore.SaveArtifact` 的幂等与身份漂移语义（同 13 项身份 ⇒ 幂等；漂移 ⇒ 冲突码而非静默覆盖，`saveArtifactSQL` 今天已是 `DO UPDATE … WHERE <身份全等>`、0 行受影响即冲突），**不新建第二套写入路径**；④ 前置 R5 鉴权的最小面（`service` 角色 + `policy.go`），使写端点不是裸口；⑤ 把 `run_artifacts` 的「谁写 / 谁读 / 保留期」写进 `db-schema.md`（core 侧材料 §5.2 K4 问 `run.walk_forward_reports` / `run.batch_runs` 的写者归谁，本单一并给答案）。
+- **④ 约束与非目标**：**不自造 wire 形状**（`SVC-ORCH-G1` ⛔ 的禁区原文：「不得在本仓自造 claim / `run_artifacts` 结构（会变成第三份 DTO）」）——若写端点的请求体需要跨仓形状，先报协调者走 `tellurion-contracts:CT-04`，本仓可用**已有的本地 DTO** 起步但必须在 `api-schema.md` 标注它是本地形状；不改队列/租约语义；不动 core 的 `backtest_jobs`；不 `DROP` 表；不引入 contracts（裁决 #9 本轮不做）。
+- **⑤ 验收**：① 重放腿两次指纹逐位相同（贴输出）；② 破坏验证：加一行 `UPDATE quant.runs` ⇒ 护栏红、还原复绿；③ 写端点四条用例：首次写入 201/200、同身份重放幂等（不刷 `created_at`）、身份漂移返回冲突码且**原行未被覆盖**、run 不存在 → 明确 404；④ 未带 service token 打写端点 ⇒ 401/403（证明它不是裸口）；⑤ `internal/qtest` 的 45 条在内存与 PG 两侧仍全绿（换实现行为不变）；⑥ 三条命令单仓绿。
+- **⑥ 边界**：本仓 schema 与写端点；worker 侧产出与上报归 `tellurion:QT-78`，core 旧 job 表停写归 `tellurion:SVC-CORE-RUN-RETIRE` + 本仓 `SVC-ORCH-G3`。
+
+### SVC-ORCH-G4 · 服务就绪门 G4：租约/回收的失败语义 · worker 可观测 · runbook（ADR-036）[P0] ⬜
+
+- **① 目标**：把「worker 挂了 / 租约过期 / 任务卡在 running / 队列满」这四类失败的说法定成文档并有判据——本仓是整个编排链里唯一持有状态机的地方。
+- **② 上下文**：`cmd/orchestrationservice` 已有周期 `ReapExpired` / `ReapOffline`（`-worker-lease` 默认 60s）、`Claim`/`ClaimByKernel` 共用一条 `claimSQL`（`FOR UPDATE SKIP LOCKED`）、提交路径用 `pg_advisory_xact_lock` 让 `queue_full` 阈值在并发下精确、R8（`cancelling` 行回收出口）与 R9（`Kernels` 领取过滤）已落两个实现、子 run 终态由 `parents.SyncSummary` 重算写回父汇总（`cancelled` 按 failed 计）；声明 `kernels` 但队列不支持过滤时 503（不静默不过录）——这条 fail-closed 姿势是对的。**缺口**：`/healthz` 有（`cmd/orchestrationservice/main.go`）但**无 `/readyz`**（全 workspace 0 命中；PG 不可达时进程仍「健康」是编排层的危险默认）；无 runbook（全 workspace `runbook` 只在 ADR-036 正文）；回收的两条语义（多久算过期、被回收的 run 归谁）只在代码与施工记录里。
+- **③ 要求**：① 失败语义表五类：租约过期被回收 / worker 离线被 `ReapOffline` / `queue_full` / `cancelling` 长期不落终态 / 上游 core 引擎返回 `invalid`（非 `failed`），各给「状态怎么写、HTTP 返回什么、调用方该做什么、是否重投」；② `/readyz`：PG 池可连 + 迁移已执行，未就绪 503；`/healthz` 保持进程语义并在文档写明两者区别；③ 回收参数（lease、心跳间隔、reaper 周期）出厂值与调界口径成文，写明「调大 lease = 故障 worker 占活更久」这个代价；④ 运维可见性：至少给「当前 running / queued / 各 worker 在领什么」一条查询面（`workers.go` 已有列表与 drain，确认它足以定位，并把用法写进 runbook）；⑤ `docs/runbook.md`：起停、看回收、人工释放卡住的 run（含 SQL 姿势与授权边界）、父/子汇总不一致时怎么核对、集成腿怎么跑；⑥ 一次演练：杀掉一个领了活的 worker ⇒ 断言该 run 在 lease 过期后被回收且不丢、父汇总把 `cancelled`/失败计入（这条是本仓最值钱的回归证据，目前没有一次性演练记录）。
+- **④ 约束与非目标**：不改状态机词汇；不动 core 的 `cmd/worker`（跨仓，归 `tellurion:QT-78` / `QT-79`）；不引 APM/编排框架；不做多副本 HA；不在本单落鉴权（属 `SVC-ORCH-G1` 与 `SVC-ORCH-G2` ④）。
+- **⑤ 验收**：① 失败语义表五类各有用例或注明原因；② `/readyz` 两条用例（无 PG → 503、恢复 → 200）；③ 演练记录：杀 worker 前后各一次真输出（含被回收 run 的终态与父汇总数字），退出码如实；④ runbook 每条命令当场执行过；⑤ 三条命令绿。
+- **⑥ 边界**：本仓失败语义与运维面；契约化与全量鉴权归 `SVC-ORCH-G1`，切读与旧 job 退役归 `SVC-ORCH-G3`。
 
 ## 施工序（候选单，开工前必须展开成六字段）
 
