@@ -1,12 +1,12 @@
 ---
 status: active
-last-verified: 2026-10-25
-verified-by: 施工 ⑪（X5c worker 打活面：注册 / 心跳 / 领取 / 续租 / 上报 / 取消确认 + 父子 run 完成时真实写回父汇总）
+last-verified: 2026-11-07
+verified-by: SVC-ORCH-G2（artifact 写端点 `POST /api/runs/jobs/{id}/artifacts` + R5 最小面 service 角色 + 新码 `artifact_conflict` / `artifact_not_found` / `auth_unavailable`）；2026-10-25 施工 ⑪（X5c worker 打活面）
 ---
 
 # API Schema — tellurion-orchestration
 
-> **实现状态（2026-10-24，施工 ③/⑥）**：`internal/queue` 已落 `JobQueue` / `WorkerRegistry` 两个 **Go port** + 内存实现 + `run` schema DDL **并已接 PG**（X5a/X5c + 施工 ③）：PG 实现在 `internal/pgstore`，与内存实现跑**同一套**语义用例（`internal/qtest`，每个实现 45 条 = 队列 30 + 注册表 9 + 跨 port 6），启动迁移在 `cmd/orchestrationservice`。`internal/httpapi` 已落**任务 4 端点**（`POST`/`GET list`/`GET {id}`/`DELETE {id}`，§1「任务」表）——端点行为按 §2 的错误码与幂等语义实现，哨兵 → wire code 的映射在 `internal/httpapi/api.go` 的 `classify`。**仍未实现**：worker / provenance 端点（X5c / X0）；鉴权（R5 未裁，`unauthenticated` / `forbidden` 暂不产生）。
+> **实现状态（2026-10-24，施工 ③/⑥）**：`internal/queue` 已落 `JobQueue` / `WorkerRegistry` 两个 **Go port** + 内存实现 + `run` schema DDL **并已接 PG**（X5a/X5c + 施工 ③）：PG 实现在 `internal/pgstore`，与内存实现跑**同一套**语义用例（`internal/qtest`，每个实现 45 条 = 队列 30 + 注册表 9 + 跨 port 6），启动迁移在 `cmd/orchestrationservice`。`internal/httpapi` 已落**任务 4 端点**（`POST`/`GET list`/`GET {id}`/`DELETE {id}`，§1「任务」表）——端点行为按 §2 的错误码与幂等语义实现，哨兵 → wire code 的映射在 `internal/httpapi/api.go` 的 `classify`。**仍未实现**：全量鉴权（R5 归 `SVC-ORCH-G1` ⛔ 待契约形状）。**R5 最小面已落（2026-11-07，G2 ④）**：只保护 artifact 写端点（service 角色），其余端点仍无鉴权；`auth_unavailable` / `unauthenticated` / `forbidden` 只在受保护端点上产生。
 > **X5b 父表（2026-10-25 施工 ⑦，裁-13）**：`run.parent_jobs` 与 `run.backtest_jobs.parent_job_id` 已落（内存 + PG 两个 `ParentStore` 实现），`internal/parents` 提供提交（写父表）与汇总（复用 `internal/plan` 写回三值计数）的服务层入口。
 > **X5b 父作业端点（2026-10-25 施工 ⑧）**：`POST /api/runs/parents` 与 `GET /api/runs/parents/{id}` 已实现（`internal/httpapi/parents.go`）——batch / walkforward 共用一套父记录与身份（`plan_hash`），原「每类父各 POST + GET」的 4 个目标端点**不再作为目标契约**（从未实现，无调用方）。**子 run 入队已落（施工 ⑩）**：提交即写 `parent_job_id`；worker 执行仍未落。
 > **X5c worker 打活面（2026-10-25 施工 ⑪）**：注册 / 心跳 / 领取 / 续租 / 上报结论 / 取消确认 + 运维面（列表 / drain）已在 `internal/httpapi/workers.go` 落地。**worker 进程不在本仓**（零 import core 是硬约束）：它跑 core 的引擎，经这组 HTTP 端点领活。子 run 上报结论后，服务端**立即重算并写回父汇总**（`parents.SyncSummary`）——这是 X5b「父汇总真实写回」的入口，不再依赖测试里的 SQL 模拟。
@@ -134,6 +134,7 @@ verified-by: 施工 ⑪（X5c worker 打活面：注册 / 心跳 / 领取 / 续�
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
+| POST | `/api/runs/jobs/{id}/artifacts` | **X0 生产者**：core worker 回传三 hash（唯一写路径，**不直写库**）；R5 最小面 = service 角色 |
 | GET | `/api/runs/{id}/provenance` | 三 hash + 引擎名 + seed |
 
 **`GET /api/runs/{id}/provenance` 响应形状**（`ProvenanceResponse`，独立 DTO，**不扩**冻结的 `BacktestResponse`）：
@@ -164,6 +165,13 @@ verified-by: 施工 ⑪（X5c worker 打活面：注册 / 心跳 / 领取 / 续�
 - 错误：非终态 → **409 `provenance_not_ready`**；终态 `failed` / `cancelled` 且无留痕 → **404 `provenance_not_found`**；终态 `completed` / `invalid` 却查不到 `run_artifacts` → **500 `provenance_missing`**（数据完整性，不得当成功使用）；未知 run → **404 `job_not_found`**。
 - 三 hash 是 run **开始后**的产物，**不是入队门槛**（§2 fail-closed ④）。写入路径 = `queue.ArtifactStore`（内存 + PG 两个实现）；本仓没有 worker 进程，生产者随 worker 落地接入。
 
+**`POST /api/runs/jobs/{id}/artifacts` 请求 / 响应（2026-11-07，SVC-ORCH-G2 ③）**：
+
+- 请求体 = **本地 DTO** `queue.ArtifactRecord`（`run_id` 可省略；出现且与路径不一致 = `400 invalid_params`）。字段形状见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.5 与 `internal/queue/artifacts.go`；**契约化**归 `SVC-ORCH-G1` ⛔ / `tellurion-contracts:CT-04`，今天按本地形状对接，不承诺跨仓冻结。
+- `created_at` 由服务端盖戳（请求体里的值被忽略）——它是留痕时间，不是调用方可填的身份。
+- 响应：首次 `201` + 落库行；同身份重放 `200` + **原行**（`created_at` 不刷新）；身份漂移 `409 artifact_conflict`（原行不被覆盖）；run 不存在 `404 job_not_found`；未装配鉴权闸 `503 auth_unavailable`；无凭证 `401`；非 service 角色 `403`。
+- 幂等与冲突判定**只在 `ArtifactStore` 一处**：HTTP 层先查 `GetArtifact` 只为选 201 / 200，最终以 `SaveArtifact` 的 `ON CONFLICT … WHERE 身份全等` 为准。
+
 ### port（给内核用，不是 HTTP）
 
 `JobQueue` / `WorkerRegistry` 的**方法集、签名、错误语义**见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.2；本文件不重复，避免两份签名漂移。
@@ -193,6 +201,9 @@ verified-by: 施工 ⑪（X5c worker 打活面：注册 / 心跳 / 领取 / 续�
 | `provenance_not_found` | 404 | job 终态 `failed` / `cancelled` 且从未写 provenance（如路由拒绝 / 从未跑到写留痕那一步） | 读 job 的 `error`；不重试读取 |
 | `provenance_missing` | 500 | 终态为 `completed` / `invalid` 却查不到 `run_artifacts`（数据完整性破坏） | 告警；**不得**当成功使用 |
 | `queue_full` | 429 | 待领取深度达上限（含父作业逐条入队子 run 时） | 退避重试；父记录保留，重放同一请求按幂等键补齐；**不 silently 丢弃** |
+| `artifact_conflict` | 409 | artifact 写：同 `run_id` 但身份字段（`strategy_ref` / 三 hash / kernel / engine_version / fill_timing）不同 | 不重试；确认上游是否换了身份，换身份应换 run |
+| `artifact_not_found` | 404 | 读路径查不到 artifact 行（写路径首次写入**不**返回本码） | 先写 artifact；不重试读取 |
+| `auth_unavailable` | 503 | 受保护路由未装配鉴权闸（装配错误，非调用方问题） | 联系运维；不重试业务 |
 
 **非错误语义**：同幂等键重复提交 → **200 + 原 `job_id` + `idempotent_replay:true`**（视为成功，不重复跑）；取消 `running` → **202 + `cancelling`**（轮询确认终态）；取消 `pending` → **200 + `cancelled`**；取消终态 → 200 原状态（幂等）。
 
@@ -214,6 +225,7 @@ verified-by: 施工 ⑪（X5c worker 打活面：注册 / 心跳 / 领取 / 续�
 - **`drain` 幂等**：重复 drain → `nil`；`offline` 再 drain → `invalid_transition`。
 - **租约与重试**：`running` 的租约过期 → 回 `pending` 且 `attempts+1`；超过 `max_attempts` → `failed`（`attempts_exhausted`）。租约丢失的 worker **禁止**再写结果（`ErrLeaseLost`），否则两个 worker 会各写一份终态。
 - 三 hash 相同 + 参数相同 → 可复用已完成结果（可选优化，但必须由 hash 决定，不能猜）；复用不改变「每次提交仍是一个有身份的 run 行」这一审计事实。
+- **artifact 写（2026-11-07，G2 ③）**：身份 = `run_artifacts` 的身份字段全集（`db-schema.md` §1 + `ARCHITECTURE.md` §9.5，13 项）。首次 → `201`；同身份重放 → `200` + 原行且 **`created_at` 不刷新**；同 `run_id` 不同身份 → `409 artifact_conflict` 且原行不被覆盖。判定唯一入口是 `ArtifactStore.SaveArtifact`（PG `ON CONFLICT (run_id) DO UPDATE … WHERE 身份全等`；0 行受影响 = 冲突）。HTTP 层的 `GetArtifact` 只用于选 201/200，不参与冲突判定。
 
 ## 4. 版本与兼容
 
@@ -233,3 +245,10 @@ verified-by: 施工 ⑪（X5c worker 打活面：注册 / 心跳 / 领取 / 续�
 - **不存结果内容**：`run` 只存 `result_uri` 指针 + 三 hash；结果明细归 core 的 state store / artifact 服务（`ARCHITECTURE.md` §9.7 R2）。
 - **不接管 core 的旧端点**：`/api/backtest`、`/api/batch`、`/api/walkforward` 在 O0 切换前仍归 core；本仓的 `/api/runs/*` 是目标面，不反向代理旧路径（双真相见 §9.7 R1）。
 - **不解析 `backtest_jobs.result` 的错误串**、不重算 `status`：K9 的 `status` 由引擎产出，本仓原样透传。
+
+## 6. 鉴权现状（R5 最小面，2026-11-07）
+
+- **代码登记**：`internal/httpapi/policy.go` 的 `AuthStatus = "write-endpoint-only"` 与策略表（只有一条：`POST /api/runs/jobs/{id}/artifacts` → `service` 角色）。
+- **只保护写端点**的原因：这是本仓唯一「机器代外部写入 `run.*`」的入口（裁决 ⑱），不能裸奔。其余端点的全量鉴权归 `SVC-ORCH-G1`（⛔ 待契约形状），今天仍无鉴权——**不是遗漏，是已登记的欠账**。
+- **fail-closed**：受保护路由未装配 Authorizer → `503 auth_unavailable`；无凭证 → `401 unauthenticated`；非 service → `403 forbidden`。启动闸同 core：有 `JWT_SECRET` 启用；无 secret + 回环 = 开放；无 secret + 非回环 = 拒绝启动。
+- **service token 的签发 / 分发不在本仓**：归 `tellurion:QT-77`；本仓只校验。

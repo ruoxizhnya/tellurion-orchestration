@@ -32,6 +32,7 @@ type Server struct {
 	q           queue.JobQueue
 	psvc        *parents.Service
 	artifacts   queue.ArtifactStore
+	authorizer  Authorizer
 	workers     queue.WorkerRegistry
 	workerLease time.Duration
 	mux         *http.ServeMux
@@ -100,6 +101,9 @@ func New(q queue.JobQueue, opts ...Option) *Server {
 		// `GET /api/runs/parents/{id}` 在 `/api/runs/parents/provenance` 上冲突
 		// （互不更具体 ⇒ 注册期 panic）。jobs / parents 都比它具体，仍优先。
 		s.mux.HandleFunc("GET /api/runs/{rest...}", s.provenance)
+		// X0 生产者（裁决 ⑱）：唯一写路径 + R5 最小面（service 角色）。
+		// 未装配 Authorizer 时 requireAuth 回 503——写端点不允许裸奔。
+		s.mux.Handle("POST /api/runs/jobs/{id}/artifacts", s.requireAuth(http.HandlerFunc(s.saveArtifact)))
 	}
 	if s.workers != nil {
 		s.registerWorkerRoutes()
@@ -325,6 +329,10 @@ func classify(err error) (int, string) {
 		return http.StatusNotFound, "parent_not_found"
 	case errors.Is(err, queue.ErrWorkerNotFound):
 		return http.StatusNotFound, "worker_not_found"
+	case errors.Is(err, queue.ErrArtifactNotFound):
+		return http.StatusNotFound, "artifact_not_found"
+	case errors.Is(err, queue.ErrArtifactConflict):
+		return http.StatusConflict, "artifact_conflict"
 	case errors.Is(err, plan.ErrInvalidRequest):
 		return http.StatusBadRequest, "invalid_params"
 	case errors.Is(err, queue.ErrIdempotencyConflict):

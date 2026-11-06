@@ -5,9 +5,11 @@
 //
 // 它**不做**的（都在 docs/ARCHITECTURE.md §9.8 如实登记）：
 //   - 不执行 run：领取后的内核装配属 core / NT 两侧，本仓没有引擎（§5 边界）；
-//   - 不鉴权：R5 未裁，unauthenticated / forbidden 今天不产生；
 //   - 不做 worker 进程本身：派活契约未定，心跳超时回收走可选接口
 //     queue.WorkerReaper（§9.7 R10），不依赖 worker 进程存在。
+//
+// 鉴权（R5 最小面，SVC-ORCH-G2 ④）：只拦 artifact 写端点（service 角色），
+// 其余端点仍无鉴权——全量 R5 归 SVC-ORCH-G1（⛔ 待契约形状）。
 package main
 
 import (
@@ -16,12 +18,16 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/ruoxizhnya/tellurion-kit/auth"
+	kithttp "github.com/ruoxizhnya/tellurion-kit/auth/httpadapter"
 
 	"tellurion-orchestration/internal/httpapi"
 	"tellurion-orchestration/internal/pgstore"
@@ -67,12 +73,25 @@ func run() error {
 		heartbeatTO = flag.Duration("heartbeat-timeout", 90*time.Second, "超过该时长没有心跳的 worker → offline（0 = 关闭；按 worker 心跳间隔配置）")
 		workerLease = flag.Duration("worker-lease", httpapi.DefaultWorkerLease, "worker 领取时写入的租约时长（worker 必须在此之前续租）")
 		startupTO   = flag.Duration("startup-timeout", 30*time.Second, "连库 + 迁移的超时")
+		jwtSecret   = flag.String("jwt-secret", envFirst("JWT_SECRET", "AUTH_JWT_SECRET"),
+			"JWT secret shared with core（空 = 回环开放访问；非回环无 secret 拒绝启动）")
+		exposure = flag.String("insecure-exposure", os.Getenv("AUTH_INSECURE_EXPOSURE"),
+			"非回环绑定时的显式开放声明（只接受 loopback-published）")
 	)
 	flag.Parse()
 
 	dsn, err := resolveDSN(*dsnFlag)
 	if err != nil {
 		return err
+	}
+
+	// 启动闸（裁-15）：有 secret ⇒ 鉴权；无 secret + 回环 ⇒ 开放；无 secret + 非回环 ⇒ 拒绝启动。
+	startup := kithttp.DecideStartup(*jwtSecret, true, bindHost(*addr), *exposure)
+	if startup.Refuse {
+		return fmt.Errorf("auth: %s", startup.Reason)
+	}
+	if startup.Insecure {
+		log.Printf("orchestrationservice: WARNING authentication disabled (open access); bind address %q is loopback-only", *addr)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -132,11 +151,14 @@ func run() error {
 		return fmt.Errorf("-worker-lease must be positive, got %s", *workerLease)
 	}
 
+	tokens := auth.NewTokenService(auth.Config{JWTSecret: startup.Secret})
+
 	const healthzPath = "/healthz"
 	mux := http.NewServeMux()
 	mux.Handle("/", httpapi.New(deps.Jobs,
 		httpapi.WithParents(deps.Parents),
 		httpapi.WithArtifacts(deps.Artifacts),
+		httpapi.WithAuthorizer(httpapi.NewAuthorizer(tokens)),
 		httpapi.WithWorkers(deps.Workers, httpapi.WorkerOptions{Lease: *workerLease})).Handler())
 	mux.HandleFunc("GET "+healthzPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -157,8 +179,8 @@ func run() error {
 		}
 	}()
 
-	log.Printf("orchestrationservice: listening on %s (max_pending=%d, reap=%s, heartbeat_timeout=%s)",
-		*addr, *depth, *reapEvery, *heartbeatTO)
+	log.Printf("orchestrationservice: listening on %s (max_pending=%d, reap=%s, heartbeat_timeout=%s, auth=%t, auth_scope=%s)",
+		*addr, *depth, *reapEvery, *heartbeatTO, tokens.Enabled(), httpapi.AuthStatus)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("listen: %w", err)
 	}
@@ -177,6 +199,25 @@ func resolveDSN(fromFlag string) (string, error) {
 	}
 	return "", errors.New("no PostgreSQL DSN: pass -dsn or set ORCHESTRATION_DSN " +
 		"(本仓不在启动时退回内存队列——那会把「重启即丢」伪装成 durable 部署)")
+}
+
+// bindHost 从 -addr 取绑定主机；取不到端口时原样当主机比（空 = 全网卡）。
+func bindHost(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return host
+}
+
+// envFirst 按顺序取第一个非空环境变量（core 历史用法 JWT_SECRET、配置口径 AUTH_JWT_SECRET）。
+func envFirst(names ...string) string {
+	for _, name := range names {
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // reap 周期回收：租约过期的行（docs/dataflow.md §2 第 7 步）+ 心跳过期的 worker

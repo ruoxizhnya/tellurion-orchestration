@@ -210,7 +210,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 > **⚠️ 开工前置（refactor-plan-review M5/M8，2026-10-20 登记）**：本表任何单开工前，必须先过 core `tellurion:docs/TASKS.md`「五、X 线」的**公共前置**两条：① 建仓/升格前先与 ADR-027 §2 对账（12 仓是上限/当前规划，不是承诺终态）；② 本仓设计文档先写「**接口对表**」小节（签名 + 错误语义 + 版本策略，模板 = `tellurion:docs/design/qt-decoupling/data-service-contract-and-ownership.md` §4.1），**未对表不开工**。正文以彼处为准，此处只留指针、不镜像。
 > **2026-10-22 订正**：原文模板指向 `target-module-topology.md` 的 UnifiedDataPoint 节——该引用在 core 仓是**幻影**（QT-42/QT-43 已实测订正），本仓同步改为 `data-service-contract-and-ownership.md` §4.1。M8 已落 §9（QT-44 侧）；M5 已结案（六仓 ≠ 六进程，本仓今天不升格容器）。
 
-### SVC-ORCH-G2 · 服务就绪门 G2：`run.*` 唯一 writer · artifact 写端点 · 迁移重放（ADR-036）[P0] ⬜
+### SVC-ORCH-G2 · 服务就绪门 G2：`run.*` 唯一 writer · artifact 写端点 · 迁移重放（ADR-036）[P0] 🔶
 
 - **① 目标**：`run` schema 六张表满足 ADR-036 §3 的 G2（自有 schema、迁移可重放、**无跨 schema 写**），并把裁决 ⑱ 要求的 artifact **写端点**落出来——它是「唯一 writer」这句话的实现，不是新功能。
 - **② 上下文**：`internal/queue` 有六表 DDL（含 `run.parent_jobs` / `run.run_artifacts`），`internal/pgstore` 是 PG 实现，`cmd/orchestrationservice` 启动即迁移并监听 `:8088`（DSN 为空 fail-closed）；语义套件 `internal/qtest` 每个实现 45 条用例（内存与 PG 同跑）。**缺口**：① `SaveArtifact` 今天**只被测试与编译期断言消费**（本仓台账施工 ⑨ 自证），即 `run_artifacts` 有读面无写者；② 裁决 ⑱ 正文（本文件 `:14`）：「X0 生产者 = **本仓新增 artifact 写端点**（`POST /api/runs/jobs/{id}/artifacts`，service 角色），core worker 调它、**不直写库**；幂等沿用 `queue.ArtifactStore.SaveArtifact`；**前置 = 本仓先做 R5 鉴权**」——这条裁决**没有对应条目**，此前只存在于指针行；③ 鉴权未落（`internal/httpapi` 无 `auth.go` / `policy.go`，`go.mod` 无 kit），故 `SVC-ORCH-G1` ⛔；④ core 仍以裸表 `backtest_jobs` 为状态/结果权威（双 owner，SYSTEM-DESIGN §5）。
@@ -218,6 +218,13 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 - **④ 约束与非目标**：**不自造 wire 形状**（`SVC-ORCH-G1` ⛔ 的禁区原文：「不得在本仓自造 claim / `run_artifacts` 结构（会变成第三份 DTO）」）——若写端点的请求体需要跨仓形状，先报协调者走 `tellurion-contracts:CT-04`，本仓可用**已有的本地 DTO** 起步但必须在 `api-schema.md` 标注它是本地形状；不改队列/租约语义；不动 core 的 `backtest_jobs`；不 `DROP` 表；不引入 contracts（裁决 #9 本轮不做）。
 - **⑤ 验收**：① 重放腿两次指纹逐位相同（贴输出）；② 破坏验证：加一行 `UPDATE quant.runs` ⇒ 护栏红、还原复绿；③ 写端点四条用例：首次写入 201/200、同身份重放幂等（不刷 `created_at`）、身份漂移返回冲突码且**原行未被覆盖**、run 不存在 → 明确 404；④ 未带 service token 打写端点 ⇒ 401/403（证明它不是裸口）；⑤ `internal/qtest` 的 45 条在内存与 PG 两侧仍全绿（换实现行为不变）；⑥ 三条命令单仓绿。
 - **⑥ 边界**：本仓 schema 与写端点；worker 侧产出与上报归 `tellurion:QT-78`，core 旧 job 表停写归 `tellurion:SVC-CORE-RUN-RETIRE` + 本仓 `SVC-ORCH-G3`。
+- **⑦ 施工记录（2026-11-07）**：
+  - **落地**：① 迁移重放用例 `internal/pgstore/g2_pg_test.go`（同一 DSN 连跑两遍 `Migrate`，比对列 / `pg_indexes` / 六表行数 sha256 指纹；`ORCHESTRATION_TEST_DSN` 未设则 skip）。② 跨 schema 护栏 `internal/httpapi/g2_schema_test.go`：静态扫全仓 `.go` 写语句，只允许 `run.` 前缀；本仓六表写成裸名也红。③ artifact 写端点 `internal/httpapi/artifacts.go`：`POST /api/runs/jobs/{id}/artifacts`，请求体 = **本地 DTO** `queue.ArtifactRecord`（`api-schema.md` §1 已标注本地形状；契约化归 `SVC-ORCH-G1` / `CT-04`），`run_id` 与路径不一致 → 400，`created_at` 服务端盖戳，首次 201 / 同身份重放 200（不刷 `created_at`）/ 漂移 409 `artifact_conflict` / run 不存在 404 `job_not_found`；冲突判定只在 `ArtifactStore.SaveArtifact`，HTTP 层不重造。④ R5 最小面：`internal/httpapi/auth.go` + `policy.go`（只有一条策略，`service` 角色；`AuthStatus="write-endpoint-only"`），`cmd` 加 `-jwt-secret` / `AUTH_JWT_SECRET` / `-insecure-exposure` + `DecideStartup` + `NewAuthorizer`；`go.mod` 引入 `tellurion-kit v0.1.4`。⑤ `db-schema.md` §1.1 登记六表「写者 / 读者 / 保留」，`walk_forward_reports` / `batch_runs` 明确「停写、O1 对拍后删除」。
+  - **用例**：`internal/httpapi/g2_test.go` 六条 —— 201→200 且 `created_at` 不刷新、身份漂移 409 且原行 `params_hash` 未变、未知 run 404、`run_id` 不一致 400、无凭证 401 / viewer 403 / service 201、未装配鉴权闸 503；`TestArtifactWritePolicyIsServiceOnly` 钉住策略只有写端点一条且角色只有 service。
+  - **破坏验证（真做真还原）**：① `run_id` 一致性检查短路 ⇒ `TestSaveArtifact_RejectsRunIDMismatch` 红（201 ≠ 400）；② 策略角色改 `viewer` ⇒ `TestSaveArtifact_RequiresServiceRole` 红（403 ≠ 201）；③ 临时加 `UPDATE quant.strategies …` ⇒ `TestNoCrossSchemaWrites` 红（报 `internal\httpapi\artifacts.go: UPDATE quant.strategies`）。三条还原后复绿。
+  - **未执行（本单 🔶 的原因）**：迁移重放**真库腿**未执行（`ORCHESTRATION_TEST_DSN` 未设、本机 Docker 引擎不可用）；`internal/qtest` 的 **PG 侧 45 条**同样未执行（无库），内存侧全绿。handler 级用例不能替代「真库 + 真迁移」验证。
+  - **文档**：`docs/api-schema.md`（§1 写端点 + 请求/响应、§2 三个新码、§3 artifact 幂等、§6 鉴权现状）、`docs/db-schema.md`（§1.1 + `run_artifacts` 行订正）、本节、`AGENTS.md`。
+  - **门禁（真实退出码）**：`gofmt -l .` 无输出、`go build ./...`=0、`go vet ./...`=0、`go test ./... -count=1`=0（`cmd/orchestrationservice`、`internal/httpapi`、`internal/parents`、`internal/pgstore`、`internal/plan`、`internal/queue` 全 ok；含 skip 的重放腿）。
 
 ### SVC-ORCH-G4 · 服务就绪门 G4：租约/回收的失败语义 · worker 可观测 · runbook（ADR-036）[P0] ⬜
 
@@ -239,7 +246,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 | X5a | job 队列 + 状态机 + 幂等键 🔶（施工 ① `internal/queue` 语义；② jobs 4 端点 HTTP 面；③ **DDL 已接 PG + 启动迁移 + 双实现共享用例**；④ R8 回收出口 + R9 `ClaimByKernel` 落两个实现）| `QT-44` | 本仓立项 |
 | X5b | batch + walkforward（窗口切分与汇总）🔶 规划与汇总纯函数 + 共享套件（2026-10-24 施工 ⑥）+ **父表 / 子 run 关系 / 提交与汇总落库（2026-10-25 施工 ⑦，裁-13）** + **父作业 HTTP 2 端点（2026-10-25 施工 ⑧，`POST/GET /api/runs/parents`）** + **子 run 入队（2026-10-25 施工 ⑩，`parent_job_id` 唯一写入方）** + **父汇总真实写回（2026-10-25 施工 ⑪：子 run 上报终态即 `SyncSummary`）**；worker **执行**在 core（`tellurion:cmd/worker`），本仓零 import core | `QT-44` | X5a |
 | X5c | worker 注册 / 心跳 / `drain` / 心跳超时 ✅（2026-10-25：施工 ① 内存；③ PG 已落；⑤ 心跳超时→`offline` 两个实现同批 + `cmd` 接线；⑪ **worker 打活 HTTP 面**：注册 / 心跳 / 领取 / 续租 / 上报 / 取消确认 / 列表 / drain，装配期能力断言 fail-closed。**worker 进程在 core**，本仓零 import core） | `QT-44` | X5a |
-| X0 | `run_artifacts` 三 hash 留痕 + `/provenance` 🔶（施工 ⑨：`ArtifactStore` 写入端口 + 内存 / PG 两个实现、`GET /api/runs/{id}/provenance` 三态、父 GET 逐子三 hash；**生产者未落**——worker 进程已在 core（施工 ⑪），但它尚未把 core 的三 hash 写入 `run_artifacts`，本仓也没有写入端点）。**裁-19 定稿（2026-10-25）**：生产读面改为 **core** `GET /api/backtest/{id}/provenance`（core QT-72）；本仓端点保持 `producer_pending`，`run_artifacts` = worker 写的投影，core 不双写 | `QT-03` | X5a |
+| X0 | `run_artifacts` 三 hash 留痕 + `/provenance` 🔶（施工 ⑨：`ArtifactStore` 写入端口 + 内存 / PG 两个实现、`GET /api/runs/{id}/provenance` 三态、父 GET 逐子三 hash；**写端点已落（2026-11-07，G2 ③）** `POST /api/runs/jobs/{id}/artifacts`，core worker 调它、不直写库（裁决 ⑱）；worker 侧实际回传仍归 `tellurion:QT-78`）。**裁-19 定稿（2026-10-25）**：生产读面改为 **core** `GET /api/backtest/{id}/provenance`（core QT-72）；本仓端点保持 `producer_pending`，`run_artifacts` = worker 写的投影，core 不双写 | `QT-03` | X5a |
 
 ## 二、跨仓指针（不在本仓，勿双写）
 

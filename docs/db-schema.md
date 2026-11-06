@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-10-25
-verified-by: 施工 ⑨（X0 `run.run_artifacts` 写入语义落地：`queue.ArtifactStore` 内存 / PG 两个实现，`ON CONFLICT (run_id) DO UPDATE … WHERE <13 项身份全等>`，0 行受影响 = 冲突；生产者未落）
+last-verified: 2026-11-07
+verified-by: SVC-ORCH-G2（`run.*` 唯一 writer 守卫 + artifact 写端点落地 + 六表「写者 / 读者 / 保留」登记 + 迁移重放用例）；2026-10-25 施工 ⑨（`queue.ArtifactStore` 的 `ON CONFLICT … WHERE <13 项身份全等>`）
 ---
 
 # DB Schema — tellurion-orchestration
@@ -22,11 +22,24 @@ verified-by: 施工 ⑨（X0 `run.run_artifacts` 写入语义落地：`queue.Art
 | `run.parent_jobs` | **父计划（batch / walkforward 共用一张表）**：`kind` + `plan_canonical` / `plan_hash`（唯一，计划身份）+ 三值汇总 + 父状态（裁-13） | DDL 已落并已接 PG（`internal/pgstore.Parents`）；提交 / 汇总写入已落 `internal/parents`；`POST/GET /api/runs/parents` 已落（施工 ⑧）；**子 run 入队已落（施工 ⑩，`parent_job_id` 由 `internal/parents` 写入）** |
 | `run.walk_forward_reports` | **迁移期旧表**：前向验证报告（被 `parent_jobs` 取代，停写） | DDL 保留只前滚；不再写入，O1 对拍后删除 |
 | `run.batch_runs` | **迁移期旧表**：批量扫描批次（被 `parent_jobs` 取代，停写） | DDL 保留只前滚；不再写入，O1 对拍后删除 |
-| `run.run_artifacts` | 每次 run 的三 hash（`strategy_ref` / `dataset_snapshot_hash` / `risk_rules_hash`）+ artifact 指针 | DDL 已落（FK 生效已实测）；**写入 / 读已落两个实现**（`queue.ArtifactStore`：内存 + `pgstore.Artifacts`，施工 ⑨）与 `GET /api/runs/{id}/provenance`；**生产者（worker 进程）未落**——本仓没有引擎；🔒 冻结面，变更须走评审 |
+| `run.run_artifacts` | 每次 run 的三 hash（`strategy_ref` / `dataset_snapshot_hash` / `risk_rules_hash`）+ artifact 指针 | DDL 已落（FK 生效已实测）；**写入 / 读已落两个实现**（`queue.ArtifactStore`：内存 + `pgstore.Artifacts`，施工 ⑨）与 `GET /api/runs/{id}/provenance`；**唯一写入口 = `POST /api/runs/jobs/{id}/artifacts`（2026-11-07，G2 ③，裁决 ⑱：core worker 调本端点、不直写库）**；worker 进程本身不在本仓；🔒 冻结面，变更须走评审 |
 | `run.worker_registry` | worker 注册与心跳（active / draining / offline） | DDL 已落并**已接 PG**（`internal/pgstore` 的 `WorkerRegistry` 实现）；心跳超时 → `offline` 由可选接口 `WorkerReaper.ReapOffline` 写入（施工 ⑤） |
 | `quant.strategy_state`（不属本仓） | 运行状态检查点（断点续跑） | 归 strategy-runtime 模块 · core 写（2026-10-21 裁决，指 `tellurion:docs/design/system-spec-review-2026-10-21.md` H5） |
 
 > 🔒 **冻结标注**：`run_artifacts` 的三 hash 与 artifact 指针属 **ResultSpec 冻结 schema 面**（`tellurion:docs/SPEC.md` K9「ResultSpec 冻结」；内容寻址三兄弟见 `tellurion-contracts:docs/api-schema.md` §3）——增列 / 改口径 / 改 hash 算法都算改冻结面，**须走评审**（`tellurion:docs/TASKS.md`「维护本文件」的冻结 schema 变更评审硬规则），不得顺手改。
+
+### 1.1 写者 / 读者 / 保留（SVC-ORCH-G2 ①，2026-11-07）
+
+> 判据不是「谁有 DSN」，而是「谁有写权限」。本仓是 `run.*` 的**唯一 writer**；跨 schema 写语句由守卫测试 `TestNoCrossSchemaWrites` 钉住（只允许 `run.` 前缀，本仓四张表也不允许裸名）。
+
+| 表 | 唯一 writer | 读者 | 保留 / 删除条件 |
+|---|---|---|---|
+| `run.backtest_jobs` | 本仓 `pgstore.JobQueue`（+ `parents` 写 `parent_job_id`） | core / analytics / ui（HTTP） | 永久（审计）；取消**不删行** |
+| `run.parent_jobs` | 本仓 `pgstore.Parents` | core / ui | 永久（审计）；随子 run 永久 |
+| `run.run_artifacts` | 本仓，**唯一 HTTP 入口** `POST /api/runs/jobs/{id}/artifacts` | `/provenance`、analytics、core | 永久；冻结面，不做自动清理 |
+| `run.worker_registry` | 本仓 `pgstore.WorkerRegistry` + `WorkerReaper` | 本仓运维面 `GET /api/runs/workers` | `offline` 保留供排查；无自动删除 |
+| `run.walk_forward_reports` | **停写**（旧表） | 迁移期对拍脚本 | O1 对拍后删除 |
+| `run.batch_runs` | **停写**（旧表） | 迁移期对拍脚本 | O1 对拍后删除 |
 
 **归属修正**（ADR-D19 已登记）：`backtest_jobs` 目前在内核侧持久化，**迁到 `run`**，内核走 port。~~`strategy_state` 一并迁 `run`~~ **（⚠️ 2026-10-21 H5 裁决作废：`strategy_state` 归 strategy-runtime 模块，core 继续写 `quant.strategy_state`，不迁 `run`，见 `tellurion:docs/design/system-spec-review-2026-10-21.md` H5）**。
 
@@ -65,7 +78,8 @@ verified-by: 施工 ⑨（X0 `run.run_artifacts` 写入语义落地：`queue.Art
   2. **版本化**：引入迁移库 + `schema_migrations` 表（可 down、有执行记录）——服务变多后更稳，但要一次性 baseline。
   **取向**：X1~X3 期间优先 ①（少一层依赖），服务数 ≥3 或出现"必须先降级"的需求时重估 ②。
   **落定（2026-10-23，施工 ①）：取取向 ①**。DDL 的唯一真相是 `internal/queue/ddl.go` 的 `migrations` 切片（`Migrations()` 只返副本）；本仓**不建** `migrations/*.sql` 可执行件——上面「迁移文件只放 `migrations/`」那条在本仓按此口径解释为「若将来改取向 ② 才启用」。切换取向 = 结构级变更，须走 ADR。
-  **执行入口落地（2026-10-23，施工 ③）**：`pgstore.Store.Migrate(ctx)` 按序执行该切片，`cmd/orchestrationservice` 在**监听之前**调用它；每条语句幂等（`IF NOT EXISTS`），可反复执行（测试里真跑两遍钉住）。首次真库落地时改了两处 DDL 原文（`request_canonical` 列 + 领取索引形状），因为当时**任何库里都还没有这套表**——追加 ALTER 是给已落库的语句用的。
+  **执行入口落地（2026-10-23，施工 ③）**：`pgstore.Store.Migrate(ctx)` 按序执行该切片，`cmd/orchestrationservice` 在**监听之前**调用它；每条语句幂等（`IF NOT EXISTS`），可反复执行。首次真库落地时改了两处 DDL 原文（`request_canonical` 列 + 领取索引形状），因为当时**任何库里都还没有这套表**——追加 ALTER 是给已落库的语句用的。
+  **重放用例（2026-11-07，SVC-ORCH-G2 ①）**：`internal/pgstore/g2_pg_test.go` 的 `TestPGMigrationsAreReplayable` 在同一 DSN 连跑两遍 `Migrate`，比对列 / `pg_indexes` / 六表行数的 sha256 指纹；`ORCHESTRATION_TEST_DSN` 未设则 skip（台账必须记「未执行」，不得当已跑）。
 - **只前滚**：已合并的迁移不改；修错靠新增一条。
 - 每条必须可重入（`IF NOT EXISTS` / `IF EXISTS`），且能在空库上一次跑完。
 - 跨 schema 取数只走**只读视图或 API**；出现 `join` 别人的表就是边界腐化的第一信号。
