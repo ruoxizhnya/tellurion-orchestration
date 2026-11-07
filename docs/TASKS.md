@@ -210,7 +210,12 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 > **⚠️ 开工前置（refactor-plan-review M5/M8，2026-10-20 登记）**：本表任何单开工前，必须先过 core `tellurion:docs/TASKS.md`「五、X 线」的**公共前置**两条：① 建仓/升格前先与 ADR-027 §2 对账（12 仓是上限/当前规划，不是承诺终态）；② 本仓设计文档先写「**接口对表**」小节（签名 + 错误语义 + 版本策略，模板 = `tellurion:docs/design/qt-decoupling/data-service-contract-and-ownership.md` §4.1），**未对表不开工**。正文以彼处为准，此处只留指针、不镜像。
 > **2026-10-22 订正**：原文模板指向 `target-module-topology.md` 的 UnifiedDataPoint 节——该引用在 core 仓是**幻影**（QT-42/QT-43 已实测订正），本仓同步改为 `data-service-contract-and-ownership.md` §4.1。M8 已落 §9（QT-44 侧）；M5 已结案（六仓 ≠ 六进程，本仓今天不升格容器）。
 
-### SVC-ORCH-G2 · 服务就绪门 G2：`run.*` 唯一 writer · artifact 写端点 · 迁移重放（ADR-036）[P0] 🔶
+### SVC-ORCH-G2 · 服务就绪门 G2：`run.*` 唯一 writer · artifact 写端点 · 迁移重放（ADR-036）[P0] ✅（2026-11-07 真库腿补跑通过）
+
+> **2026-11-07 真库腿补跑（✅）**：便携 PostgreSQL 16.2 @ `127.0.0.1:55432`；
+> `ORCHESTRATION_TEST_DSN='postgres://postgres@127.0.0.1:55432/tellurion_orchestration_test?sslmode=disable' go test ./... -count=1 -v`
+> → 顶层 `PASS=313 / SKIP=0`、退出码 0；其中 `TestPGMigrationsAreReplayable` PASS，`internal/qtest` 的 PG 侧 45 条**不再 skip**。
+> ⑤①~⑤⑥ 均已有真实输出（② 跨 schema 护栏破坏验证沿用本节原记录）。
 
 - **① 目标**：`run` schema 六张表满足 ADR-036 §3 的 G2（自有 schema、迁移可重放、**无跨 schema 写**），并把裁决 ⑱ 要求的 artifact **写端点**落出来——它是「唯一 writer」这句话的实现，不是新功能。
 - **② 上下文**：`internal/queue` 有六表 DDL（含 `run.parent_jobs` / `run.run_artifacts`），`internal/pgstore` 是 PG 实现，`cmd/orchestrationservice` 启动即迁移并监听 `:8088`（DSN 为空 fail-closed）；语义套件 `internal/qtest` 每个实现 45 条用例（内存与 PG 同跑）。**缺口**：① `SaveArtifact` 今天**只被测试与编译期断言消费**（本仓台账施工 ⑨ 自证），即 `run_artifacts` 有读面无写者；② 裁决 ⑱ 正文（本文件 `:14`）：「X0 生产者 = **本仓新增 artifact 写端点**（`POST /api/runs/jobs/{id}/artifacts`，service 角色），core worker 调它、**不直写库**；幂等沿用 `queue.ArtifactStore.SaveArtifact`；**前置 = 本仓先做 R5 鉴权**」——这条裁决**没有对应条目**，此前只存在于指针行；③ 鉴权未落（`internal/httpapi` 无 `auth.go` / `policy.go`，`go.mod` 无 kit），故 `SVC-ORCH-G1` ⛔；④ core 仍以裸表 `backtest_jobs` 为状态/结果权威（双 owner，SYSTEM-DESIGN §5）。
