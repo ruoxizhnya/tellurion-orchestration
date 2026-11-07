@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -116,6 +118,81 @@ func TestDepsFieldsAreInterfaces(t *testing.T) {
 		if iface.Kind() != reflect.Interface {
 			t.Fatalf("harness bug: %s is not an interface type", iface)
 		}
+	}
+}
+
+type fakeReadiness struct{ err error }
+
+func (f fakeReadiness) Ready(context.Context) error { return f.err }
+
+// 探针分工（SVC-ORCH-G4 ②）：/healthz 只说进程活着；/readyz 才看 PG + 迁移。
+// 业务面用 418 占位，任何探针落到业务面都会立刻暴露。
+func TestProbesSplitProcessFromStore(t *testing.T) {
+	api := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+
+	srv := httptest.NewServer(newMux(api, fakeReadiness{}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != "ok" {
+		t.Fatalf("/healthz = %d %q, want 200 ok", resp.StatusCode, body)
+	}
+
+	resp, err = http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var ready map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&ready); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || ready["status"] != "ready" || ready["store"] != "postgres" {
+		t.Fatalf("/readyz = %d %+v, want 200 ready/postgres", resp.StatusCode, ready)
+	}
+}
+
+func TestReadyzFailsClosed(t *testing.T) {
+	api := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+
+	srv := httptest.NewServer(newMux(api, fakeReadiness{err: errors.New("pgstore: ping: connection refused")}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var ready map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&ready); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable || ready["status"] != "not_ready" {
+		t.Fatalf("/readyz = %d %+v, want 503 not_ready", resp.StatusCode, ready)
+	}
+	if !strings.Contains(ready["error"], "connection refused") {
+		t.Fatalf("readyz must name the store failure: %+v", ready)
+	}
+
+	// 未装配判定（装配错误）也必须 503，不能默认 ready。
+	unwired := httptest.NewServer(newMux(api, nil))
+	defer unwired.Close()
+	resp, err = http.Get(unwired.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("unwired /readyz = %d, want 503", resp.StatusCode)
 	}
 }
 

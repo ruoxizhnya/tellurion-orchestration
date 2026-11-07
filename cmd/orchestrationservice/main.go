@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -153,21 +154,15 @@ func run() error {
 
 	tokens := auth.NewTokenService(auth.Config{JWTSecret: startup.Secret})
 
-	const healthzPath = "/healthz"
-	mux := http.NewServeMux()
-	mux.Handle("/", httpapi.New(deps.Jobs,
+	api := httpapi.New(deps.Jobs,
 		httpapi.WithParents(deps.Parents),
 		httpapi.WithArtifacts(deps.Artifacts),
 		httpapi.WithAuthorizer(httpapi.NewAuthorizer(tokens)),
-		httpapi.WithWorkers(deps.Workers, httpapi.WorkerOptions{Lease: *workerLease})).Handler())
-	mux.HandleFunc("GET "+healthzPath, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintln(w, "ok")
-	})
+		httpapi.WithWorkers(deps.Workers, httpapi.WorkerOptions{Lease: *workerLease})).Handler()
 
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           mux,
+		Handler:           newMux(api, deps.Store),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -199,6 +194,53 @@ func resolveDSN(fromFlag string) (string, error) {
 	}
 	return "", errors.New("no PostgreSQL DSN: pass -dsn or set ORCHESTRATION_DSN " +
 		"(本仓不在启动时退回内存队列——那会把「重启即丢」伪装成 durable 部署)")
+}
+
+// readiness 是 /readyz 的最小依赖面：PG 池可连 + run.* 六表已迁移。
+// 声明成接口是为了让探针本身可测（不需要真库）。
+type readiness interface {
+	Ready(ctx context.Context) error
+}
+
+// newMux 把公开探针与业务 HTTP 面拼起来（SVC-ORCH-G4 ②）。
+//
+// 探针分工固定：
+//   - `/healthz` = 进程在监听（text/plain "ok"），不查任何依赖；
+//   - `/readyz` = 能接活（PG 可连 + 迁移已执行），未就绪 503 且带原因。
+//
+// 两者都在鉴权之外：部署面必须无凭证可用。抽成函数是为了能测「探针确实
+// 注册了、且 readyz 的判定真的接上了」——这不是靠读代码能断言的事实。
+func newMux(api http.Handler, ready readiness) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/", api)
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprintln(w, "ok")
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if ready == nil {
+			writeProbe(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "store": "unwired"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := ready.Ready(ctx); err != nil {
+			writeProbe(w, http.StatusServiceUnavailable, map[string]string{
+				"status": "not_ready", "store": "postgres", "error": err.Error(),
+			})
+			return
+		}
+		writeProbe(w, http.StatusOK, map[string]string{"status": "ready", "store": "postgres"})
+	})
+	return mux
+}
+
+func writeProbe(w http.ResponseWriter, code int, body map[string]string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		log.Printf("orchestrationservice: write probe: %v", err)
+	}
 }
 
 // bindHost 从 -addr 取绑定主机；取不到端口时原样当主机比（空 = 全网卡）。

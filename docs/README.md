@@ -20,6 +20,7 @@ verified-by: M8 接口对表（QT-44 前置 ②）
 | 改表 / 加列 | [`db-schema.md`](db-schema.md) |
 | 加 / 改接口 | [`api-schema.md`](api-schema.md) |
 | 改数据流向或顺序 | [`dataflow.md`](dataflow.md) |
+| 起停 / 值班 / 卡住的 run 怎么救 | [`runbook.md`](runbook.md) |
 | 想知道"为什么这样设计" | [`adr/`](adr/README.md) |
 | 要做删档 / 迁移 / 流程变更 | [`odr/`](odr/README.md) |
 | 查历史 | [`archive/`](archive/README.md) |
@@ -32,6 +33,7 @@ verified-by: M8 接口对表（QT-44 前置 ②）
 | [`db-schema.md`](db-schema.md) | **表结构唯一真相源** + 所有权声明 | 改表的人 |
 | [`api-schema.md`](api-schema.md) | **对外接口唯一真相源** + 错误码 / 幂等 / 兼容 | 改接口的人 |
 | [`dataflow.md`](dataflow.md) | 数据流向、时序、fail-closed 点、不变量 | 改链路的人 |
+| [`runbook.md`](runbook.md) | 起停、探针、失败语义五类、回收参数调界、运维可见性、人工释放 SQL、父/子汇总核对、演练记录 | 排障 / 部署的人 |
 | [`TASKS.md`](TASKS.md) | 可执行任务（六字段） | 每个人 |
 | [`adr/`](adr/README.md) | 架构决策（只增不删） | 提变更的人 |
 | [`odr/`](odr/README.md) | 运行 / 治理决策（删档、审计、迁移、工具） | 做事的人 |

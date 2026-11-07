@@ -226,7 +226,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
   - **文档**：`docs/api-schema.md`（§1 写端点 + 请求/响应、§2 三个新码、§3 artifact 幂等、§6 鉴权现状）、`docs/db-schema.md`（§1.1 + `run_artifacts` 行订正）、本节、`AGENTS.md`。
   - **门禁（真实退出码）**：`gofmt -l .` 无输出、`go build ./...`=0、`go vet ./...`=0、`go test ./... -count=1`=0（`cmd/orchestrationservice`、`internal/httpapi`、`internal/parents`、`internal/pgstore`、`internal/plan`、`internal/queue` 全 ok；含 skip 的重放腿）。
 
-### SVC-ORCH-G4 · 服务就绪门 G4：租约/回收的失败语义 · worker 可观测 · runbook（ADR-036）[P0] ⬜
+### SVC-ORCH-G4 · 服务就绪门 G4：租约/回收的失败语义 · worker 可观测 · runbook（ADR-036）[P0] 🔶
 
 - **① 目标**：把「worker 挂了 / 租约过期 / 任务卡在 running / 队列满」这四类失败的说法定成文档并有判据——本仓是整个编排链里唯一持有状态机的地方。
 - **② 上下文**：`cmd/orchestrationservice` 已有周期 `ReapExpired` / `ReapOffline`（`-worker-lease` 默认 60s）、`Claim`/`ClaimByKernel` 共用一条 `claimSQL`（`FOR UPDATE SKIP LOCKED`）、提交路径用 `pg_advisory_xact_lock` 让 `queue_full` 阈值在并发下精确、R8（`cancelling` 行回收出口）与 R9（`Kernels` 领取过滤）已落两个实现、子 run 终态由 `parents.SyncSummary` 重算写回父汇总（`cancelled` 按 failed 计）；声明 `kernels` 但队列不支持过滤时 503（不静默不过录）——这条 fail-closed 姿势是对的。**缺口**：`/healthz` 有（`cmd/orchestrationservice/main.go`）但**无 `/readyz`**（全 workspace 0 命中；PG 不可达时进程仍「健康」是编排层的危险默认）；无 runbook（全 workspace `runbook` 只在 ADR-036 正文）；回收的两条语义（多久算过期、被回收的 run 归谁）只在代码与施工记录里。
@@ -234,6 +234,16 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 - **④ 约束与非目标**：不改状态机词汇；不动 core 的 `cmd/worker`（跨仓，归 `tellurion:QT-78` / `QT-79`）；不引 APM/编排框架；不做多副本 HA；不在本单落鉴权（属 `SVC-ORCH-G1` 与 `SVC-ORCH-G2` ④）。
 - **⑤ 验收**：① 失败语义表五类各有用例或注明原因；② `/readyz` 两条用例（无 PG → 503、恢复 → 200）；③ 演练记录：杀 worker 前后各一次真输出（含被回收 run 的终态与父汇总数字），退出码如实；④ runbook 每条命令当场执行过；⑤ 三条命令绿。
 - **⑥ 边界**：本仓失败语义与运维面；契约化与全量鉴权归 `SVC-ORCH-G1`，切读与旧 job 退役归 `SVC-ORCH-G3`。
+
+> **施工记录（2026-11-07，代码 + 内存级演练；真库腿未执行）**：
+> - **代码落点**：`cmd/orchestrationservice/main.go` 新增 `readiness` 接口与 `newMux`（`/healthz` = `text/plain` `ok`，不查依赖；`/readyz` = 2s 超时内查 PG 池 + `run.*` 六表迁移，`nil` → 503 `store=unwired`、err → 503 `store=postgres` + `error`、ok → 200 `{"status":"ready","store":"postgres"}`）；`internal/pgstore/store.go` 新增 `Store.Ready(ctx)`（Ping + `to_regclass` 六表）；`cmd/orchestrationservice/main_test.go` 新增 `fakeReadiness` + `TestProbesSplitProcessFromStore` + `TestReadyzFailsClosed`（业务面用 418 占位，探针误落业务面会立刻暴露）。
+> - **演练用例**：`internal/queue/g4_drill_test.go`（入队 → `w-dead` 领取 → 时钟越过租约 → `ReapExpired` n=1 → 行回 `pending` / `attempts=1` / 租约清空 → **另一个 worker 领到同一条** → 写 `completed` → 全表仍 1 行）；`internal/parents/g4_drill_test.go`（4 条子 run 的 batch → 三轮「过期 → 回收」耗尽默认预算 → `failed` + `attempts_exhausted`；另一条 `pending → cancelled`；`SyncSummary` 后父计数 `total 4 / completed 0 / invalid 0 / failed 2`、状态仍 `running`、子行仍 4）。
+> - **文档**：新增 `docs/runbook.md`（起停 / 探针分工 / 五类失败语义表 / 回收参数出厂值与调界（含「调大 lease = 故障 worker 占活更久」）/ 运维可见性 / 人工释放 SQL 与授权边界 / 父-子汇总核对与已知缺口 / 集成腿 / 演练记录）；`docs/api-schema.md` §1 增「探针（公开，无鉴权）」；`docs/README.md` 导航与文档地图补 runbook；`docs/ARCHITECTURE.md` §9.8 装配行补 `/readyz` 与 runbook 指针；`AGENTS.md` §1 / §5。
+> - **演练真实输出**：`go test ./internal/queue -run TestDrillDeadWorkerRunIsReclaimedAndCompleted -v` → `--- PASS`，`ok … 0.046s`；`go test ./internal/parents -run TestDrillReclaimedAndCancelledChildrenCountAsFailed -v` → `--- PASS`，`ok … 0.043s`（退出码均为 0）；`go test ./cmd/orchestrationservice -run 'TestProbesSplitProcessFromStore|TestReadyzFailsClosed' -v` → 两条 `--- PASS`。
+> - **破坏验证（真做真还原）**：把 `internal/parents/service.go` 的 `taskOutcomeOf` 里 `cancelled → failed` 临时改成空分支 → 演练红：`g4_drill_test.go:95: parent counts = total 4 / completed 0 / invalid 0 / failed 1, want 4/0/0/2`；逐字节还原后 `go test ./internal/parents -count=1` 复绿。另一条：把 `/readyz` 的 `ready == nil` 分支改成 200 → `TestReadyzFailsClosed` 红（`unwired /readyz = 200, want 503`），已还原。
+> - **门禁（真实退出码）**：`gofmt -l .` 无输出、`FMT=0 BUILD=0 VET=0 TEST=0`（`cmd/orchestrationservice`、`internal/httpapi`、`internal/parents`、`internal/pgstore`、`internal/plan`、`internal/queue` 全 ok）。
+> - **未执行（本单 🔶 的原因，不写成「通过」）**：① 真库启动 + `/readyz` 503 → 200 恢复腿（本机 `127.0.0.1:5432` 无监听）；② runbook §6 的 `psql` 观察 / 人工释放 SQL（同因）；③ 杀**真** worker 进程的端到端演练（worker 在 core `tellurion:cmd/worker`，真实链路需真库 + core 配合）；④ `docker compose -f deploy/compose.yaml up`（Docker 引擎不可用）。
+> - **遗留缺口（runbook §7.3 已写）**：`parents.SyncSummary` 只在子 run 上报路径触发；reaper / 人工 SQL 让子 run 落终态时父汇总不会立即重算，父记录会停在 `running`，直到同父下另一条子 run 上报。本单不扩范围修，显式登记。
 
 ## 施工序（候选单，开工前必须展开成六字段）
 

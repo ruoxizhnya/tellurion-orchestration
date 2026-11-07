@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-11-07
-verified-by: SVC-ORCH-G2（artifact 写端点 `POST /api/runs/jobs/{id}/artifacts` + R5 最小面 service 角色 + 新码 `artifact_conflict` / `artifact_not_found` / `auth_unavailable`）；2026-10-25 施工 ⑪（X5c worker 打活面）
+verified-by: SVC-ORCH-G4（`/healthz` / `/readyz` 分工）；SVC-ORCH-G2（artifact 写端点 `POST /api/runs/jobs/{id}/artifacts` + R5 最小面 service 角色 + 新码 `artifact_conflict` / `artifact_not_found` / `auth_unavailable`）；2026-10-25 施工 ⑪（X5c worker 打活面）
 ---
 
 # API Schema — tellurion-orchestration
@@ -18,6 +18,15 @@ verified-by: SVC-ORCH-G2（artifact 写端点 `POST /api/runs/jobs/{id}/artifact
 > 跨仓消费方（core / agent / ui / 其他服务）按本文件编码，**不读本仓实现**。
 
 ## 1. 接口面
+
+### 探针（公开，无鉴权）
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/healthz` | 进程在监听（`text/plain`：`ok`）；**不查任何依赖** |
+| GET | `/readyz` | 能接活：PG 池可连 + `run.*` 六表已迁移；未就绪 `503` + 原因 |
+
+两者都**不经过业务路由表**，也不在鉴权范围内（部署面必须无凭证可用）。`/healthz` 200 不代表服务可用；运维口径、失败语义与人工处置见 [`runbook.md`](runbook.md)。
 
 ### 任务
 

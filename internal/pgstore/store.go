@@ -67,6 +67,27 @@ func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 // Close 释放池。
 func (s *Store) Close() { s.pool.Close() }
 
+// Ready 校验持久层就绪（`/readyz` 的存储腿，SVC-ORCH-G4 ②）：池可连 +
+// run.* 六表已迁移。只查存在性，不查数据，也不代替 `/healthz` 的进程语义。
+func (s *Store) Ready(ctx context.Context) error {
+	if err := s.pool.Ping(ctx); err != nil {
+		return fmt.Errorf("pgstore: ping: %w", err)
+	}
+	for _, table := range []string{
+		"backtest_jobs", "run_artifacts", "batch_runs",
+		"walk_forward_reports", "worker_registry", "parent_jobs",
+	} {
+		var name *string
+		if err := s.pool.QueryRow(ctx, `SELECT to_regclass($1)::text`, "run."+table).Scan(&name); err != nil {
+			return fmt.Errorf("pgstore: check table run.%s: %w", table, err)
+		}
+		if name == nil {
+			return fmt.Errorf("pgstore: table run.%s is missing (migrations not applied)", table)
+		}
+	}
+	return nil
+}
+
 // Migrate 按序执行 queue.Migrations()：幂等、无版本表、只前滚
 // （docs/db-schema.md §4 取向 ①）。服务启动时在监听之前调用。
 //
