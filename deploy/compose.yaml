@@ -15,6 +15,16 @@ services:
       - "127.0.0.1:8088:8088"
     environment:
       ORCHESTRATION_DSN: ${ORCHESTRATION_DSN:-postgres://postgres:postgres@host.docker.internal:5432/tellurion?sslmode=disable}
+      # 凭证来源（QT-77）：验签方口径本服务**已部分持证**——`SVC-ORCH-G2` 的
+      # R5 最小面只保护 `POST /api/runs/jobs/{id}/artifacts`（service 角色），
+      # 其余端点与 worker 侧签发归 `SVC-ORCH-G1`（⛔：等 contracts 的编排形状）。
+      # 空值 = 回环开放访问；非回环无 secret 由启动闸拒绝。签发/轮换见
+      # tellurion:docs/SPEC.md 的「服务间凭证」节。
+      JWT_SECRET: ${JWT_SECRET:-}
+      # 容器内绑 0.0.0.0（否则端口发不出去），但端口只发布在宿主回环 ——
+      # 无 secret 时靠这一项让启动闸（kit DecideStartup）放行；缺它则
+      # `docker compose up` 会按设计拒绝启动。
+      AUTH_INSECURE_EXPOSURE: ${AUTH_INSECURE_EXPOSURE:-loopback-published}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
