@@ -46,6 +46,8 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 - **⑥ 边界**：只改本仓与 contracts 的接口层；core 客户端改造归 **`SVC-CORE-RUN-RETIRE`** 跟踪——条目**已在 core 立单**（2026-10-26 同日补，`tellurion:docs/TASKS.md:121`「六之二、退役执行单」，串行第 5；判据逐字抄 B 组材料 §4.2）。基线数会随施工漂移，开工时当场重跑。
 
 > **⛔ 开工前置复核（2026-10-26，未开工）**：`go.mod` 只有 `github.com/jackc/pgx/v5 v5.7.3`，**无 contracts / kit**；contracts 侧**无编排形状包、无对应立单**。不得在本仓自造 claim / `run_artifacts` 结构（会变成第三份 DTO）。contracts 形状 + kit `v0.1.4` 升 pin 属跨仓腿，报协调者。
+>
+> **前置更新（2026-11-07）**：contracts 侧 **CT-04 已结案**——`tellurion-contracts` 新建 `run/` 包（`ClaimView` / `ProvenanceView` / `ParentSubmitRequest` 族 + `ChildIdempotencyKey`），本地 tag `v0.8.0`。但 tag **未 push**（本机纪律只 commit 不 push），`go get …@v0.8.0` 在远端解析不到 ⇒ 本仓**今天仍不能**把 `go.mod` 切到 contracts（会破坏单仓可构建）。本单剩余前置 = **contracts `v0.8.0` 推远端 + kit `v0.1.4` 已在远端**；码面改造（claim / 父作业提交改用契约类型）等前置解除后一笔做，不在契约侧代做。
 
 ### SVC-ORCH-G3 · core 任务面切换与旧 job 实现退役（ADR-036）[P0] ⛔（2026-10-26 复核：等 B 组退役单）
 
@@ -273,6 +275,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 |---|---|---|
 | QT-44 | X5 编排 / worker 服务（job/batch/walkforward 上移） | 已迁入本仓「一、本仓任务」（2026-10-21；core `tellurion:docs/TASKS.md` 留同号指针） |
 | QT-08 | 本仓 CI / AGENTS / 台账由该单一并补齐 | `tellurion:docs/TASKS.md` |
+| CT-04 | 编排 wire 形状已落 contracts（`run/`：`ClaimView` / `ProvenanceView` / `ParentSubmitRequest` 族 + 子 run 幂等键） | `tellurion-contracts:docs/TASKS.md`（✅ 2026-11-07，本地 tag `v0.8.0` **未 push**）；本仓改别名 + 升 pin 归 `SVC-ORCH-G1`（前置 = tag 推远端） |
 
 ---
 
