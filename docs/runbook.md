@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-11-07
-verified-by: SVC-ORCH-G4（失败语义五类 + `/readyz` + 回收参数口径 + 运维可见性 + 两条内存级演练）
+verified-by: SVC-ORCH-G4（失败语义五类 + `/readyz` + 回收参数口径 + 运维可见性 + 两条内存级演练 + 2026-11-07 真库腿：`/readyz` 503→200、租约回收、§6 SQL）
 ---
 
 # Runbook — tellurion-orchestration
@@ -20,9 +20,11 @@ verified-by: SVC-ORCH-G4（失败语义五类 + `/readyz` + 回收参数口径 +
 | 内存级演练：死 worker 回收后仍可完成 | **已执行** | `go test ./internal/queue -run TestDrillDeadWorkerRunIsReclaimedAndCompleted -v` → PASS |
 | 内存级演练：回收/取消计入父汇总 | **已执行** | `go test ./internal/parents -run TestDrillReclaimedAndCancelledChildrenCountAsFailed -v` → PASS |
 | 无 DSN 拒绝启动 | **已执行** | `ORCHESTRATION_DSN='' go run ./cmd/orchestrationservice` → `exit status 1` + `no PostgreSQL DSN: …` |
-| 起真库、`psql` 查询 / 人工释放 SQL | **未执行** | 本机 `127.0.0.1:5432` 无监听；Docker 引擎不可用 |
-| 杀真 worker 进程的端到端演练 | **未执行** | worker 进程在 core（`tellurion:cmd/worker`），本仓无引擎；真实队列腿需 `ORCHESTRATION_TEST_DSN` |
-| `docker compose -f deploy/compose.yaml up` | **未执行** | 同上：Docker 引擎不可用 |
+| 真库 `/readyz` 503 → 200（同一服务进程） | **已执行** | 便携 PG 16.2 `127.0.0.1:55432`：`pg_ctl … stop -m fast`（`STOP_EXIT=0`）后 `/readyz` → 503（`pgstore: ping: … actively refused`），同刻 `/healthz` 仍 200 `ok`；重启库后 → 200（2026-11-07） |
+| 真库租约回收演练（HTTP 级模拟 worker 消失） | **已执行** | 见 §9.4：`a45df712…` attempts 0→1→2 → `failed/attempts_exhausted`，父汇总数字同节 |
+| 真库 §6 观察 / 人工释放 SQL | **已执行** | 本机 PG 发行版**无 `psql`**，用 `postgres --single -D <data> tellurion_orchestration_test` 执行同形 SQL；`SQL_EXIT=0`（2026-11-07，详见 §6 末注） |
+| 杀真 worker 进程的端到端演练 | **未执行** | worker 进程在 core（`tellurion:cmd/worker`），本仓无引擎；本次以 HTTP 停心跳模拟 worker 消失 |
+| `docker compose -f deploy/compose.yaml up` | **未执行** | Docker 引擎不可用 |
 
 > 下文命令凡标「未执行」的，都是**按代码与 DDL 写的姿势**，不冒充已验收。第一条真库执行者请把结果补进本节与 `docs/TASKS.md` SVC-ORCH-G4 的施工记录。
 
@@ -106,7 +108,7 @@ orchestrationservice: listening on 127.0.0.1:8088 (max_pending=10000, reap=30s, 
 - 装配错误（`ready == nil`）也 fail-closed 回 503，不默认 ready。
 
 已执行用例：`TestProbesSplitProcessFromStore`、`TestReadyzFailsClosed`（`cmd/orchestrationservice/main_test.go`）。
-真库恢复腿（503 → 200）**未执行**：需要 `ORCHESTRATION_TEST_DSN`，本机无 PG。
+真库恢复腿（503 → 200）**已执行（2026-11-07）**：便携 PG 16.2 + 真 `cmd/orchestrationservice`（`127.0.0.1:18088`）。`pg_ctl -D <data> stop -m fast` → `STOP_EXIT=0`；随后 `/readyz` → `503 {"error":"pgstore: ping: failed to connect to … dial tcp 127.0.0.1:55432: connectex: No connection could be made because the target machine actively refused it.","status":"not_ready","store":"postgres"}`，同刻 `/healthz` → `200` + `ok`；重启库后 `/readyz` → `200 {"status":"ready","store":"postgres"}`（**未重启服务**，连接池自愈）。
 
 ## 3. 回收参数与调界口径
 
@@ -237,7 +239,7 @@ SELECT id, status, result_status, attempts, error_message, completed_at, lease_u
 
 预期：`pending` 且 `lease_until IS NULL`（可被重新领取），或 `failed/attempts_exhausted`，或 `cancelled`。
 
-> 本节的 `psql` 命令 **本机未执行**（无 PG）。语法按 `internal/pgstore/queue.go` 的 `reapSQL` / `reapCancellingSQL` 逐条对齐；首次在真库执行的人请把实际输出补进 §0 与台账。
+> 本节 SQL **已于 2026-11-07 在真库执行**：本机 PG 16.2 发行版只带 `initdb` / `pg_ctl` / `postgres`（**无 `psql` 客户端**），因此用 `postgres --single -D <data> tellurion_orchestration_test` 执行同形 SQL（单用户模式逐行执行，**语句必须写成单行**；`:'run_id'` 换成字面量）。实测：§6.2 观察命中 `ccb5e769… status=running attempts=1 worker_id=w-sql overdue=00:00:07.86214`；§6.3 释放 → 后镜像 `status=pending attempts=2`；同一 SQL 在行已非 `running`（被 reaper 回收后）再跑为 `UPDATE 0`，守卫成立；`SQL_EXIT=0`。恢复服务后 `GET /api/runs/jobs/ccb5e769…` → `200 status=pending`。
 
 ## 7. 父 / 子汇总核对
 
@@ -288,7 +290,7 @@ ORCHESTRATION_TEST_DSN='postgres://postgres:postgres@127.0.0.1:5432/tellurion_or
 
 - 未设置 `ORCHESTRATION_TEST_DSN` 时这些腿 **skip**。skip 不是绿：它只证明「本机没跑」，不证明「接了库也对」。
 - `TestTwoProcessesShareTheQueueAgainstPG` 是端到端判据：进程 A 提交、进程 B（独立连接池）领取并写终态、A 能看见、幂等键在库里不重复。
-- 本机这两条 **未执行**（无 PG / Docker 引擎不可用）。
+- 本机这条腿 **已执行（2026-11-07）**：`ORCHESTRATION_TEST_DSN='postgres://postgres@127.0.0.1:55432/tellurion_orchestration_test?sslmode=disable' go test ./internal/pgstore ./cmd/orchestrationservice -count=1` → 全 PASS，`internal/qtest` 的 PG 侧 45 条不再 skip（台账 `SVC-ORCH-G2` 施工记录同批取证）。Docker 引擎仍不可用，容器腿未执行。
 
 ## 9. 演练记录（SVC-ORCH-G4 ⑥）
 
@@ -327,8 +329,33 @@ FAIL	tellurion-orchestration/internal/parents	0.043s
 
 ### 9.3 未执行的演练腿
 
-- **杀真 worker 进程**：worker 在 core（`tellurion:cmd/worker`），本仓无引擎；真实链路需要 core 侧配合与真库。
-- **真库上的 reaper**：需要在有 PG 的环境跑 `cmd/orchestrationservice`，再按 §6.2 观察 `lease_until` 与 `attempts` 变化。
-- **`/readyz` 503 → 200**：需要先断开 PG 再恢复。
+- **杀真 worker 进程**：worker 在 core（`tellurion:cmd/worker`），本仓无引擎；真实链路需要 core 侧配合。本次真库演练用 HTTP 停心跳模拟 worker 消失（§9.4），**不是**杀进程。
+- **`docker compose -f deploy/compose.yaml up`**：Docker 引擎不可用。
 
-以上三条**未执行**，不写成「通过」。
+以上两条**未执行**，不写成「通过」。
+
+### 9.4 真库上的租约回收（已执行，2026-11-07）
+
+环境：便携 PG 16.2（`127.0.0.1:55432`，库 `tellurion_orchestration_test`）+ 真 `cmd/orchestrationservice`（`-reap-interval 2s -heartbeat-timeout 3s -worker-lease 5s`，`127.0.0.1:18088`）。
+
+```text
+# 提交父作业（batch，2 个子 run）
+POST /api/runs/parents → 202 parent_job_id=3866fdc02b693c0a9a6b006669f7900c total=2 counts.pending=2
+
+# w-dead 领取后停心跳
+claim(w-dead) → run_id=a45df712ba08e14b5499d50b4ec2b4ed attempts=0 lease_until=2026-11-07T07:44:39Z
+12s 无心跳 → 该行 pending（started_at 保留、completed_at=null）；GET /api/runs/workers → w-dead=offline
+
+# 另一个 worker 领到同一条（不丢、不新建行）
+claim(w-alive) → run_id=a45df712… attempts=1
+租约再过期 → attempts=2
+预算耗尽 → status=failed error=attempts_exhausted completed_at=2026-11-07T07:45:42.7539Z
+第二条子 run e60182f4… → 同样 failed/attempts_exhausted
+
+# 父汇总（真库 SQL，§7.2 原文）
+status=running total=2 completed=0 invalid=0 failed=0 children=2 kids_failed=2 kids_open=0
+```
+
+判读：子 run 终态与父汇总数字**不一致**——`kids_open=0` 而父仍 `running / failed=0`，正是 §7.3 登记的已知缺口（reaper 落终态不触发 `SyncSummary`）；本次真库演练把它复现并留档，按台账决定不在 G4 修。
+
+`/readyz` 与 §6 SQL 的真库记录分别见 §2 与 §6 末注。
