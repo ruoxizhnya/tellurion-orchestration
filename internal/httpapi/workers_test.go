@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ruoxizhnya/tellurion-contracts/run"
+
 	"tellurion-orchestration/internal/queue"
 )
 
@@ -35,10 +37,10 @@ func registerWorker(t *testing.T, s *Server, id, kernels string) {
 }
 
 type claimResponse struct {
-	Job *claimView `json:"job"`
+	Job *run.ClaimView `json:"job"`
 }
 
-func claim(t *testing.T, s *Server, workerID string) *claimView {
+func claim(t *testing.T, s *Server, workerID string) *run.ClaimView {
 	t.Helper()
 	code, resp := do(t, s, "POST", "/api/runs/workers/"+workerID+"/claim", "")
 	if code != 200 {

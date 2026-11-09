@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ruoxizhnya/tellurion-contracts/run"
+
 	"tellurion-orchestration/internal/queue"
 )
 
@@ -98,20 +100,12 @@ type workerListBody struct {
 	Workers []workerView `json:"workers"`
 }
 
-// claimView 是领取的响应体：worker 需要 run_spec 才能执行，所以不复用
+// claimBody 是领取的响应体：worker 需要 run_spec 才能执行，所以不复用
 // GET /api/runs/jobs/{id}（那里不返回请求体）。
-type claimView struct {
-	RunID           string          `json:"run_id"`
-	RunSpec         json.RawMessage `json:"run_spec"`
-	Attempts        int             `json:"attempts"`
-	MaxAttempts     int             `json:"max_attempts"`
-	LeaseUntil      *time.Time      `json:"lease_until"`
-	CancelRequested bool            `json:"cancel_requested"`
-	ParentJobID     string          `json:"parent_job_id,omitempty"`
-}
-
+//
+// 形状归 contracts/run.ClaimView（CT-04 收编，ORCH-G1），本仓不再复刻一份。
 type claimBody struct {
-	Job *claimView `json:"job"`
+	Job *run.ClaimView `json:"job"`
 }
 
 type workerOnlyRequest struct {
@@ -277,8 +271,8 @@ func (s *Server) claimJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, claimBody{Job: claimViewOf(job)})
 }
 
-func claimViewOf(job *queue.RunRecord) *claimView {
-	return &claimView{
+func claimViewOf(job *queue.RunRecord) *run.ClaimView {
+	return &run.ClaimView{
 		RunID:           job.ID,
 		RunSpec:         job.RequestJSON,
 		Attempts:        job.Attempts,

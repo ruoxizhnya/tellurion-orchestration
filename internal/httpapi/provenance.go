@@ -18,42 +18,22 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"time"
+
+	"github.com/ruoxizhnya/tellurion-contracts/run"
 
 	"tellurion-orchestration/internal/queue"
 )
 
-// provenanceView 是 `ProvenanceResponse`（docs/ARCHITECTURE.md §9.3）——
-// **独立 DTO**，不扩冻结的 `BacktestResponse`（27 项字段集一个字不动）。
-//
-// `artifact_uri` / `artifact_hash` / `version_hash` 可空：内置策略没有独立
-// artifact；显式出 null 而不是省略键，读侧不用猜「没有」与「空串」的区别。
-// `risk_rules_hash` 是空串时表示**未登记**（QT-42 X3b 之前），不是「无规则」。
-type provenanceView struct {
-	RunID               string     `json:"run_id"`
-	RunSpecHash         string     `json:"run_spec_hash"`
-	DatasetSnapshotHash string     `json:"dataset_snapshot_hash"`
-	RiskRulesHash       string     `json:"risk_rules_hash"`
-	StrategyRef         string     `json:"strategy_ref"`
-	ArtifactURI         *string    `json:"artifact_uri"`
-	ArtifactHash        *string    `json:"artifact_hash"`
-	VersionHash         *string    `json:"version_hash"`
-	ParamsHash          string     `json:"params_hash"`
-	Seed                *int64     `json:"seed"`
-	Kernel              string     `json:"kernel"`
-	EngineVersion       string     `json:"engine_version"`
-	FillTiming          string     `json:"fill_timing"`
-	ResultStatus        *string    `json:"result_status"`
-	CreatedAt           *time.Time `json:"created_at"`
-}
-
 // provenanceOf 把「留痕 ⋈ job」折成响应体。
+//
+// 形状归 contracts/run.ProvenanceView（CT-04 收编，ORCH-G1），本仓不再复刻；
+// 可空字段显式出 null 而不是省略键的冻结语义由契约包钉住。
 //
 // result_status 与 created_at 的来源刻意分开：前者是 run 的结论（job 那一轴），
 // 后者是留痕的写入时间（`run_artifacts.created_at`）。两个时间不混用——job 的
 // 创建时间在 `GET /api/runs/jobs/{id}` 里已经有了。
-func provenanceOf(job *queue.RunRecord, art *queue.ArtifactRecord) provenanceView {
-	return provenanceView{
+func provenanceOf(job *queue.RunRecord, art *queue.ArtifactRecord) run.ProvenanceView {
+	return run.ProvenanceView{
 		RunID:               art.RunID,
 		RunSpecHash:         art.RunSpecHash,
 		DatasetSnapshotHash: art.DatasetSnapshotHash,

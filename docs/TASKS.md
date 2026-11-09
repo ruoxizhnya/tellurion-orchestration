@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-10-25
-verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；⑤ = R10；⑥ = X5b 规划与汇总 + 共享套件；⑦ = 裁-13 父表 `parent_jobs` + `backtest_jobs.parent_job_id` + 提交 / 汇总落库；⑧ = 父作业 HTTP 2 端点 + plan_hash 身份；⑨ = X0 三 hash 读面 `run_artifacts` + `/provenance`；⑩ = 子 run 入队 + `parent_job_id` 写入方；⑪ = X5c worker 打活面 + 父汇总真实写回）
+last-verified: 2026-11-09
+verified-by: SVC-ORCH-G1 契约收编（2026-11-09：`contracts v0.9.0` 远端可解析、claim/provenance/父作业请求改引 `contracts/run`、逐字节 golden 三条、core 客户端同批收编；全量 R5 仍欠）；SVC-ORCH-G4 ✅；SVC-ORCH-G2 ✅
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -36,7 +36,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 > - **破坏验证**：临时给 `orchestration` 加 `depends_on: missing-svc` → `config -q` 退出 1（`service "orchestration" depends on undefined service "missing-svc"`）→ 逐字节还原后复绿（exit 0，SHA256 一致）。
 > - **如实登记**：未改队列/worker 语义；`go.mod` 仍只有 pgx，未引 contracts / kit；`run_artifacts` 生产者与子 run 入队等仍属 G3。
 
-### SVC-ORCH-G1 · 契约化与鉴权（ADR-036 G1）[P0] ⛔（2026-10-26 复核：无契约形状）
+### SVC-ORCH-G1 · 契约化与鉴权（ADR-036 G1）[P0] 🔶（2026-11-09：契约收编已落，全量 R5 未启用）
 
 - **① 目标**：本仓的 wire 形状进 contracts，服务间调用用 kit service token，不再靠 core/本仓各写一份 DTO。
 - **② 上下文**：今天 `go.mod` 只有 pgx；core `internal/orchestrationworker` 与本仓各写一套 claim/job 结构。
@@ -48,6 +48,13 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 > **⛔ 开工前置复核（2026-10-26，未开工）**：`go.mod` 只有 `github.com/jackc/pgx/v5 v5.7.3`，**无 contracts / kit**；contracts 侧**无编排形状包、无对应立单**。不得在本仓自造 claim / `run_artifacts` 结构（会变成第三份 DTO）。contracts 形状 + kit `v0.1.4` 升 pin 属跨仓腿，报协调者。
 >
 > **前置更新（2026-11-07）**：contracts 侧 **CT-04 已结案**——`tellurion-contracts` 新建 `run/` 包（`ClaimView` / `ProvenanceView` / `ParentSubmitRequest` 族 + `ChildIdempotencyKey`），本地 tag `v0.8.0`。但 tag **未 push**（本机纪律只 commit 不 push），`go get …@v0.8.0` 在远端解析不到 ⇒ 本仓**今天仍不能**把 `go.mod` 切到 contracts（会破坏单仓可构建）。本单剩余前置 = **contracts `v0.8.0` 推远端 + kit `v0.1.4` 已在远端**；码面改造（claim / 父作业提交改用契约类型）等前置解除后一笔做，不在契约侧代做。
+>
+> **施工记录（2026-11-09）**：前置已解除——`go get github.com/ruoxizhnya/tellurion-contracts@v0.9.0` 在本机 **exit 0**（远端可解析），`go.mod` 现同时含 `contracts v0.9.0`（direct）与 `kit v0.1.4`。
+> - **本仓落点**：`internal/httpapi/workers.go` 删本地 `claimView` → `run.ClaimView`；`provenance.go` 删本地 `provenanceView` → `run.ProvenanceView`；`parents.go` 删本地 `ParentSubmitRequest` / `ParentBatchRequest` / `ParentWalkForwardRequest` / `ParentWindows` 四个 DTO → `contracts/run`，两个折叠方法改自由函数。`jobView` / `parentView` / `parentChildView` / `parentCountsView` / `WorkerRecord` **按契约包「不迁」清单保留在本仓**，不是重复 DTO。
+> - **core 腿（同批，属 `SVC-CORE-RUN-RETIRE` 客户端腿）**：`internal/orchestrationworker/client.go` 删 `ClaimedJob` → `run.ClaimView`，`loop.go` 的 `execute` 签名与 `worker_test.go` 同步。
+> - **逐字节证据**：新增 `internal/httpapi/contract_shapes_test.go` 三条冻结用例——claim（普通 run 无 `parent_job_id` 键 / 子 run 键在末尾）、provenance（15 字段，五个可空位显式 `null`）、父作业请求往返；任何字段重排 / 加 `omitempty` / 可空变省略键都会红。
+> - **门禁实测（2026-11-09）**：orchestration `go build ./...` = 0、`go vet ./...` = 0、`go test ./... -count=1` = 0（8 个包 ok）、`gofmt -l .` 空；core `go build ./...` = 0、`go vet ./internal/orchestrationworker/...` = 0、`go test ./internal/orchestrationworker/... -count=1` = 0。
+> - **未完成（如实，不写成已完成）**：**全量 R5 未启用**——策略表仍只有 `POST /api/runs/jobs/{id}/artifacts` 一条（`internal/httpapi/policy.go`），其余路由无鉴权。原因：调用方（core `orchestrationworker.Client`、analytics `internal/upstream`）尚未注入 service token，单侧启用会直接断链；"service token 可调用"今天只在 artifact 写端点成立。⇒ 本单保持 🔶，全量 R5 需要跨仓同批（本仓策略表 + core/analytics 客户端带 token + 部署注入）。
 
 ### SVC-ORCH-G3 · core 任务面切换与旧 job 实现退役（ADR-036）[P0] ⛔（2026-10-26 复核：等 B 组退役单）
 
@@ -275,7 +282,7 @@ verified-by: QT-44 施工 ①②③④⑤⑥⑦⑧⑨⑩⑪（④ = R8 / R9；�
 |---|---|---|
 | QT-44 | X5 编排 / worker 服务（job/batch/walkforward 上移） | 已迁入本仓「一、本仓任务」（2026-10-21；core `tellurion:docs/TASKS.md` 留同号指针） |
 | QT-08 | 本仓 CI / AGENTS / 台账由该单一并补齐 | `tellurion:docs/TASKS.md` |
-| CT-04 | 编排 wire 形状已落 contracts（`run/`：`ClaimView` / `ProvenanceView` / `ParentSubmitRequest` 族 + 子 run 幂等键） | `tellurion-contracts:docs/TASKS.md`（✅ 2026-11-07，本地 tag `v0.8.0` **未 push**）；本仓改别名 + 升 pin 归 `SVC-ORCH-G1`（前置 = tag 推远端） |
+| CT-04 | 编排 wire 形状已落 contracts（`run/`：`ClaimView` / `ProvenanceView` / `ParentSubmitRequest` 族 + 子 run 幂等键） | `tellurion-contracts:docs/TASKS.md`（✅ 2026-11-07；`v0.8.0` → `v0.9.0` 已可经远端解析）；本仓与 core 的收编已落（`SVC-ORCH-G1` 施工记录 2026-11-09） |
 
 ---
 

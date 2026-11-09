@@ -14,38 +14,15 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ruoxizhnya/tellurion-contracts/run"
+
 	"tellurion-orchestration/internal/plan"
 	"tellurion-orchestration/internal/queue"
 )
 
-// parentSubmitRequest 是 POST 的请求体。kind 决定 batch / walkforward **二者取一**：
-// 同时给出两个载荷是歧义请求，直接 400（不猜哪一个才是意图）。
-type parentSubmitRequest struct {
-	IdempotencyKey string                    `json:"idempotency_key"`
-	Kind           string                    `json:"kind"`
-	Batch          *parentBatchRequest       `json:"batch"`
-	WalkForward    *parentWalkForwardRequest `json:"walkforward"`
-}
-
-type parentBatchRequest struct {
-	BaseRunSpec json.RawMessage              `json:"base_run_spec"`
-	Grid        map[string][]json.RawMessage `json:"grid"`
-}
-
-type parentWalkForwardRequest struct {
-	BaseRunSpec json.RawMessage `json:"base_run_spec"`
-	Windows     parentWindows   `json:"windows"`
-	// TradingDays 是调用方传入的交易日历（`YYYY-MM-DD`，严格递增）。
-	// 本仓不自造日历（docs/dataflow.md；日历属 data 服务的只读 port）。
-	TradingDays []string `json:"trading_days"`
-}
-
-type parentWindows struct {
-	TrainDays    int `json:"train_days"`
-	TestDays     int `json:"test_days"`
-	StepDays     int `json:"step_days"`
-	MinTrainDays int `json:"min_train_days"`
-}
+// 提交请求的形状归 contracts/run（CT-04 收编，ORCH-G1）：ParentSubmitRequest /
+// ParentBatchRequest / ParentWalkForwardRequest / ParentWindows 在本仓不再复刻。
+// 本文件只保留**校验**（kind 二者取一、必填字段点名）与到 plan 输入的折叠。
 
 // parentCountsView 是三值汇总 + 两个派生值。`settled` 与 `pending` 由 total
 // 推出，不另存列——落库的是四个计数，读侧不制造第二份真相。
@@ -113,7 +90,7 @@ type parentView struct {
 // submitParent 见 docs/api-schema.md §1「批量 / 前向」：新建 202、幂等重放 200。
 // 缺幂等键先于领域校验（与 jobs 端点同一 fail-closed 口径，服务端不代生成键）。
 func (s *Server) submitParent(w http.ResponseWriter, r *http.Request) {
-	var req parentSubmitRequest
+	var req run.ParentSubmitRequest
 	if err := decodeBody(w, r, &req); err != nil {
 		writeInvalidParams(w, err)
 		return
@@ -125,7 +102,7 @@ func (s *Server) submitParent(w http.ResponseWriter, r *http.Request) {
 
 	switch queue.ParentKind(req.Kind) {
 	case queue.ParentBatch:
-		planReq, err := req.batchRequest()
+		planReq, err := batchRequest(req)
 		if err != nil {
 			writeInvalidParams(w, err)
 			return
@@ -138,7 +115,7 @@ func (s *Server) submitParent(w http.ResponseWriter, r *http.Request) {
 		s.writeParentSubmit(w, parent, created)
 
 	case queue.ParentWalkForward:
-		base, cfg, days, err := req.walkForwardRequest()
+		base, cfg, days, err := walkForwardRequest(req)
 		if err != nil {
 			writeInvalidParams(w, err)
 			return
@@ -170,7 +147,7 @@ func (s *Server) writeParentSubmit(w http.ResponseWriter, parent *queue.ParentRe
 
 // batchRequest 把 wire 载荷折成 plan.BatchRequest，并拒绝歧义 / 缺字段。
 // 展开期错误（空网格、非标量、超上限）由 plan.ExpandBatch 报出并点名参数。
-func (r parentSubmitRequest) batchRequest() (plan.BatchRequest, error) {
+func batchRequest(r run.ParentSubmitRequest) (plan.BatchRequest, error) {
 	if r.WalkForward != nil {
 		return plan.BatchRequest{}, fmt.Errorf("walkforward must be absent when kind=%q", queue.ParentBatch)
 	}
@@ -186,7 +163,7 @@ func (r parentSubmitRequest) batchRequest() (plan.BatchRequest, error) {
 // walkForwardRequest 把 wire 载荷折成 plan 的三元输入，并逐项点名非法字段。
 // 日期只接受 `YYYY-MM-DD`（不 trim、不猜）：日历严格递增与窗口参数范围由
 // plan.SplitWindows 继续校验。
-func (r parentSubmitRequest) walkForwardRequest() (json.RawMessage, plan.WindowConfig, []time.Time, error) {
+func walkForwardRequest(r run.ParentSubmitRequest) (json.RawMessage, plan.WindowConfig, []time.Time, error) {
 	if r.Batch != nil {
 		return nil, plan.WindowConfig{}, nil, fmt.Errorf("batch must be absent when kind=%q", queue.ParentWalkForward)
 	}

@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ruoxizhnya/tellurion-contracts/run"
+
 	"tellurion-orchestration/internal/queue"
 )
 
@@ -96,7 +98,7 @@ func TestProvenance_ReturnsTheThreeHashesAndK9Conclusion(t *testing.T) {
 				t.Fatalf("provenance must be an independent DTO without lifecycle status: %s", resp)
 			}
 
-			var pv provenanceView
+			var pv run.ProvenanceView
 			if err := json.Unmarshal([]byte(resp), &pv); err != nil {
 				t.Fatalf("provenance view: %v\n%s", err, resp)
 			}

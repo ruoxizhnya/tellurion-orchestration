@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-10-25
-verified-by: 施工 ⑪（X5c worker 打活面：注册 / 心跳 / 领取 / 续租 / 上报 / 取消确认 + 父汇总真实写回；worker 进程在 core `cmd/worker`；§9.4/§9.8 同步）
+last-verified: 2026-11-09
+verified-by: SVC-ORCH-G1 契约收编（§9.3 增 `ClaimView` / `ParentSubmitRequest` 行，`ProvenanceResponse` 契约位改 `contracts/run`）；2026-10-25 施工 ⑪
 ---
 
 # 架构 — tellurion-orchestration
@@ -172,6 +172,7 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | DTO / 字段 | 今天 | 契约位 | 形状与判据 | 版本策略 |
 |---|---|---|---|---|
 | `RunRecord` | `JobRecord`（`pkg/backtest/job/job.go:68`） | contracts | `{ID, IdempotencyKey, RequestJSON, RequestHash, Status, ResultStatus, Priority, Attempts, MaxAttempts, WorkerID, LeaseUntil, CancelRequested, ErrorMessage, ResultURI, CreatedAt, StartedAt, CompletedAt}`；`Status` = 队列生命周期六值（§9.5），`ResultStatus` = K9 三值或空 | 加字段 = MINOR；改 `Status` 语义 = MAJOR |
+| `ClaimView`（wire） | `contracts/run.ClaimView`（`run/run.go:46`，2026-11-09 收编） | contracts | `{run_id, run_spec, attempts, max_attempts, lease_until, cancel_requested, parent_job_id?}`；`parent_job_id` 普通 run 不出现键（omitempty） | 字段改名 / 顺序 / 可空性改 = MAJOR |
 | `RunSubmitRequest`（wire） | `CreateJobRequest`（`pkg/backtest/job/job.go:181`） | 本仓 HTTP | `{idempotency_key, run_spec: BacktestRequest, priority}`；`run_spec` 是**完整** RunSpec，不再拆分扁平列；`idempotency_key` 必填、长度上限 128 | 新 endpoint = MINOR；字段改名 = MAJOR |
 | `ListFilter` | 无 | contracts | `{Status, ResultStatus, Limit, Before}`；`Limit` 由实现钳到 ≤100；未知枚举值拒绝 | 同上 |
 | `WorkerRecord` | 无 | contracts | `{WorkerID, Kernels []string, Status(active/draining/offline), LastHeartbeatAt, DrainRequestedAt, StartedAt, Meta}`；`Kernels` 的消费点在施工 ④ 已落——`ClaimByKernel` 按它过滤（未知内核的 worker 不接该活），空声明 = 不过滤 | 同上 |
@@ -182,7 +183,8 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | `WalkForwardRequest` | `WalkForwardRequest`（`pkg/backtest/walkforward/walkforward.go:56`） | 本仓 HTTP | `{idempotency_key, run_spec: BacktestRequest, windows: {train_days, test_days, step_days, min_train_days}}`；每个窗口的 train/test 都从 `run_spec` **原样派生**（只改日期），不许丢 kernel/timing/seed | 新 endpoint = MINOR |
 | `WalkForwardReport` | `domain.WalkForwardReport`（`pkg/domain/backtest.go:120`） | contracts | `{wf_id, status(队列生命周期), windows[], total/completed/invalid/failed_windows, aggregates}`；每个 window 带 `train_run_id` / `test_run_id` / 两侧 `result_status`；**部分失败显式计数，不静默丢** | 同上；旧 `windows_json` 的字段形态不冻结（新 endpoint 用新 DTO） |
 | `WalkForwardParams` | 无 json tag（`pkg/domain/backtest.go:92`） | contracts | wire 用 `snake_case`（`train_days` / `test_days` / `step_days` / `min_train_days`），必填正整数；`min_train_days` 空 = `train_days/2`（与今天 `RunWalkForward` 一致） | 旧 `/api/walkforward` 的 `TrainDays` 形态保持到切换；新 endpoint 不复用 |
-| `ProvenanceResponse` | 无 | 本仓 HTTP | `{run_id, run_spec_hash, dataset_snapshot_hash, risk_rules_hash, strategy_ref, artifact_uri, artifact_hash, version_hash, params_hash, seed, kernel, engine_version, fill_timing, result_status, created_at}`；**独立 DTO，不扩 `BacktestResponse`** | 加字段 = MINOR；hash 算法改 = MAJOR |
+| `ParentSubmitRequest` 族（wire） | `contracts/run.ParentSubmitRequest`（`run/run.go:85`，2026-11-09 收编） | contracts | `{idempotency_key, kind, batch?, walkforward?}`；`kind` 决定二者取一，同时出现 = `invalid_params` | 字段改名 / 可空性改 = MAJOR |
+| `ProvenanceResponse` | `contracts/run.ProvenanceView`（`run/run.go:63`，2026-11-09 收编） | contracts | `{run_id, run_spec_hash, dataset_snapshot_hash, risk_rules_hash, strategy_ref, artifact_uri, artifact_hash, version_hash, params_hash, seed, kernel, engine_version, fill_timing, result_status, created_at}`；**独立 DTO，不扩 `BacktestResponse`**；可空字段显式出 `null` | 加字段 = MINOR；hash 算法改 = MAJOR |
 | `BacktestRequest` | `pkg/backtest/contracts/contracts.go:171` | contracts（frozen） | 本单只读、只存、只透传；**不改字段**（per-run seed / strategy params 见 §9.7 R3） | 冻结面，改动走 SPEC 评审 |
 | `BacktestResponse` | `pkg/backtest/contracts/contracts.go`（K9，`docs/SPEC.md:3179`） | contracts（frozen） | 27 项字段集 + 三值 status；本仓**不解析错误串**、不重算 status，只原样存/取 | 冻结面，改动走 SPEC 评审 |
 | `Job`（今天的响应） | `pkg/backtest/job/job.go:209` | core-only | 只有 `pending` / `running` / `completed` / `failed` 四值，没有 `result_status`；新 endpoint 不复用 | O0 后删除 |
