@@ -92,6 +92,10 @@ verified-by: SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析�
 > **施工记录（2026-11-09，第六腿：core 同步回测切结果面）**：core `pkg/backtest/job` 增 `WithResultFace`，`SaveSyncResult` 注入后只写 `run.backtest_results`、不再插 `backtest_jobs`；`pkg/storage` 补 `ListBacktestResults`，core 读面因此能列出「只有结果行、没有任务行」的作业（同步回测与迁移存量）。本仓无码改动（任务面仍只由本仓写）。**仍未做**：删 core `pkg/backtest/job`/`batch` 本地队列、drop 旧表 —— 本单保持 🔶。
 >
 > **施工记录（2026-11-09，第七腿：core 本地队列退役 + 本仓 `run_spec` 读面补字段）**：core 侧 `pkg/storage/backtest_jobs.go` 整删、`pkg/backtest/job` 收为只读 + 结果面写口、Migration 065 `DROP TABLE IF EXISTS backtest_jobs`，异步 POST 未配 `ORCHESTRATION_URL` 即 503——任务面从此只有一个真相（本仓 `run.backtest_jobs`）。本仓侧为「列表页对纯编排作业补策略元数据」补了 `jobView.run_spec`（**MINOR**：加字段）：`GET /api/runs/jobs/{id}` 恒返回 `run_spec`；`GET /api/runs/jobs` 默认省略、`?include_spec=1` 时逐行返回，避免 1 MiB × 100 的响应放大。core 的 `List` 客户端据此多一个 `includeSpec` 实参（默认 false）。本仓单测/构建/vet 全绿，`docs/api-schema.md` §9.4 已同步。**仍未做**：本单 ⑤ 的「core `pkg/backtest` 对本仓引用符合契约」要等 core 后续单删掉 storage 直连；本单保持 🔶。
+>
+> **施工记录（2026-11-10，收尾复核：⑤-1 / ⑤-2 取证，仍不翻 ✅）**：core `SVC-CORE-RUN-RETIRE` ③ 于 2026-11-10 落地（`tellurion` commit `2a01d77`）——`pkg/backtest` 持久化改为接口注入，**生产侧** `"tellurion/pkg/storage"` import = **0**（`git grep -n '"tellurion/pkg/storage"' -- 'pkg/backtest/**/*.go' ':!*_test.go'` → 零命中、EXIT=1），护栏 `internal/repoguard/TestBacktestDoesNotImportStorage` 绿。core 非测试代码里 `backtest_jobs` 共 **30 处**，逐行核对后**全为注释**，唯一非注释命中是 Migration 065 的 `DROP TABLE IF EXISTS backtest_jobs`（`tellurion:pkg/storage/postgres.go:647`）；读写点 = 0，护栏 `TestBacktestJobsPersistenceIsRetired` 绿。⇒ ⑤-1「core `pkg/backtest` 对本仓引用符合契约」与 ⑤-2「core 裸表 `backtest_jobs` 零新增」已取证（当场实测：`ok tellurion/internal/repoguard 0.205s`）。
+>
+> **仍未满足（如实，不把 🔶 翻成 ✅）**：⑤-3「同批 run 新旧路径结果一致」在旧本地队列已删（Migration 065）之后**已无法按字面执行**——没有旧路径可对照。替代证据是 `tellurion:cmd/analysis/orchestration_jobs_test.go` 的 run_spec 映射 8 条用例（只翻新执行路径真正消费的字段，手续费/滑点/策略参数不翻，避免口径漂移），属**代裁，待主任追认**；⑤-4「X5b 关闭」需要 orchestration 进程 + 真 PG + 数据的端到端 batch/walkforward 真跑取证，本轮**未跑**。本单保持 🔶，不写成已完成。
 
 ### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] 🔶
 
