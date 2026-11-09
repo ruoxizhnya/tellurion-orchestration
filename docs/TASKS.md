@@ -83,7 +83,9 @@ verified-by: SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析�
 >
 > **施工记录（2026-11-09，第二腿：core 结果面存储基础）**：按 `tellurion:docs/design/qt-decoupling/data-service-contract-and-ownership.md:41` 的分工——任务面归本仓 `run.backtest_jobs`，**结果面 `run.backtest_results` 归 core、单一写者**——在 core 落 `tellurion:pkg/storage/backtest_results.go`：`BacktestResultsSchemaDDL`（3 条：schema + 表 + `result_status` 索引，CHECK 只允许 `completed` / `invalid` / `failed`）、`SaveBacktestResult`（按 `run_id` upsert，`created_at` 首写保留）、`GetBacktestResult`，经 core `pkg/storage/postgres.go` 的 Migration 063 接进 `migrationStatements()`。真库验收：本机 PG 16.15 上 `TestBacktestResult*` 六组全 PASS。本仓无码改动（结果内容不进本仓，符合 §3 禁止项）。**仍未做**：worker 结果 sink 改写、core `cmd/analysis` 异步入口改调、切读、存量迁移、删 core 本地队列 —— 本单保持 🔶。
 
-> **施工记录（2026-11-09，第三腿：core worker 结果面 sink）**：core `internal/orchestrationworker` 新增 `ResultStoreSink`（写 core 的 `run.backtest_results`，只接受 completed / invalid）与 `MultiSink`；`tellurion:cmd/worker` 装配改为过渡期双写（结果面新腿 + legacy `backtest_jobs` 腿），legacy 腿待切读 + 存量迁移后删。单测 3 条 + 真库 1 条 PASS。本仓仍无码改动（结果内容不进本仓）。**仍未做**：core `cmd/analysis` 异步入口改调、切读、存量迁移、删 core 本地队列 —— 本单保持 🔶。
+> **施工记录（2026-11-09，第三腿：core worker 结果面 sink）**：core `internal/orchestrationworker` 新增 `ResultStoreSink`（写 core 的 `run.backtest_results`，只接受 completed / invalid）与 `MultiSink`；`tellurion:cmd/worker` 装配先过渡期双写（结果面新腿 + legacy `backtest_jobs` 腿），随后在第五腿收为只写结果面。单测 3 条 + 真库 1 条 PASS。本仓仍无码改动（结果内容不进本仓）。**仍未做**：切读、存量迁移、删 core 本地队列 —— 本单保持 🔶。
+>
+> **施工记录（2026-11-09，第五腿：core 存量回填 + 停写 legacy）**：core Migration 064 把 `backtest_jobs` 终态行回填 `run.backtest_results`（pending/running 不搬、ON CONFLICT DO NOTHING、重放幂等）；`tellurion:cmd/worker` 只保留 `ResultStoreSink`，`JobStoreSink` 已删。真库用例 PASS。**仍未做**：core 同步回测仍写 `backtest_jobs`、`pkg/backtest/job`/`batch` 本地队列未删、旧表未 drop —— 本单保持 🔶。
 
 ### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] 🔶
 
