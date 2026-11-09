@@ -80,6 +80,8 @@ verified-by: SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析�
 > **前置解除（2026-11-09，实测）**：三条剩余前置已全部满足——① `CT-04` 结案且 `contracts v0.9.0` 远端可解析（见 `SVC-ORCH-G1`）；② 全量 R5 已落（同上，16 条路由 service 角色）；③ `POST /api/runs/jobs/{id}/artifacts` 已在 `SVC-ORCH-G2` 落地。⇒ 本单从 ⛔ 转 🔶，可以开工；施工顺序仍是「core analysis 异步入口改调本仓 → core 裸表零新增 → 存量迁移 → 删 core 本地队列写路径 → UI/openapi 同步」。
 >
 > **施工记录（2026-11-09，第一腿：core 任务面客户端）**：`tellurion:internal/orchestrationworker/client.go` 新增 `Submit` / `List` / `Cancel`（路径与状态码按本仓 `docs/api-schema.md` §9.4），真 orchestration 进程 + 真 PG 的 wire 用例 `TestWireControlPlaneWithRealOrchestrationProcess` **PASS**（提交 202 → 同键重放 200 → 列表 → 取消 → 复读；1.48s）。本仓 wire 契约未改，无需动码。**仍未做**：core `cmd/analysis` 异步入口改调、结果面 `run.backtest_results`、存量迁移、删 core 本地队列 —— 本单保持 🔶。
+>
+> **施工记录（2026-11-09，第二腿：core 结果面存储基础）**：按 `tellurion:docs/design/qt-decoupling/data-service-contract-and-ownership.md:41` 的分工——任务面归本仓 `run.backtest_jobs`，**结果面 `run.backtest_results` 归 core、单一写者**——在 core 落 `tellurion:pkg/storage/backtest_results.go`：`BacktestResultsSchemaDDL`（3 条：schema + 表 + `result_status` 索引，CHECK 只允许 `completed` / `invalid` / `failed`）、`SaveBacktestResult`（按 `run_id` upsert，`created_at` 首写保留）、`GetBacktestResult`，经 core `pkg/storage/postgres.go` 的 Migration 063 接进 `migrationStatements()`。真库验收：本机 PG 16.15 上 `TestBacktestResult*` 六组全 PASS。本仓无码改动（结果内容不进本仓，符合 §3 禁止项）。**仍未做**：worker 结果 sink 改写、core `cmd/analysis` 异步入口改调、切读、存量迁移、删 core 本地队列 —— 本单保持 🔶。
 
 ### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] 🔶
 
