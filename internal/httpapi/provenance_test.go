@@ -26,7 +26,7 @@ func newProvenanceServer(t *testing.T) (*Server, *queue.Memory, *queue.MemoryArt
 	t.Helper()
 	m := queue.NewMemory(queue.MemoryOptions{Now: func() time.Time { return baseTime }})
 	arts := queue.NewMemoryArtifacts(m, queue.MemoryOptions{Now: func() time.Time { return baseTime }})
-	return New(m, WithArtifacts(arts)), m, arts
+	return New(m, WithArtifacts(arts), WithAuthorizer(allowAllAuthorizer{})), m, arts
 }
 
 // seedRun 提交一条并推进到终态（resultStatus 为空 → 只跑到 running，用来造 409）。
@@ -230,7 +230,7 @@ func TestGetParent_ChildrenCarryThreeHashes(t *testing.T) {
 		NewID: func() string { return "parent-fixed" },
 	})
 	arts := queue.NewMemoryArtifacts(m, queue.MemoryOptions{Now: func() time.Time { return baseTime }})
-	s := New(m, WithParents(parentStore), WithArtifacts(arts))
+	s := New(m, WithParents(parentStore), WithArtifacts(arts), WithAuthorizer(allowAllAuthorizer{}))
 
 	code, resp := do(t, s, "POST", "/api/runs/parents", batchParentBody("batch-x0"))
 	if code != http.StatusAccepted {
@@ -304,7 +304,7 @@ func TestGetParent_ChildrenWithoutArtifactsOmitHashes(t *testing.T) {
 		NewID: func() string { return "parent-fixed" },
 	})
 	arts := queue.NewMemoryArtifacts(m, queue.MemoryOptions{Now: func() time.Time { return baseTime }})
-	s := New(m, WithParents(parentStore), WithArtifacts(arts))
+	s := New(m, WithParents(parentStore), WithArtifacts(arts), WithAuthorizer(allowAllAuthorizer{}))
 
 	code, resp := do(t, s, "POST", "/api/runs/parents", batchParentBody("batch-no-art"))
 	if code != http.StatusAccepted {

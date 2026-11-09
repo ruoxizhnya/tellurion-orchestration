@@ -30,7 +30,7 @@ func newParentServer(t *testing.T) (*Server, *queue.Memory, *queue.MemoryParents
 		Now:   func() time.Time { return baseTime },
 		NewID: func() string { return "parent-fixed" },
 	})
-	return New(m, WithParents(store)), m, store
+	return New(m, WithParents(store), WithAuthorizer(allowAllAuthorizer{})), m, store
 }
 
 func batchParentBody(key string) string {

@@ -60,6 +60,12 @@ func (a kitAuthorizer) Authorize(r *http.Request) error {
 	return nil
 }
 
+// guarded 是全量 R5（SVC-ORCH-G1）的装配点：每一条 /api/* 路由都过鉴权闸。
+// 公开面只有进程入口的 /healthz / /readyz，它们不经过本包的 mux。
+func (s *Server) guarded(h http.HandlerFunc) http.HandlerFunc {
+	return s.requireAuth(h).ServeHTTP
+}
+
 // requireAuth 是 fail-closed 闸：未装配 Authorizer → 503；无凭证 → 401；角色不足 → 403。
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

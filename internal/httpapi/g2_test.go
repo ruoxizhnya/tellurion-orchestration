@@ -134,7 +134,8 @@ func TestSaveArtifact_RejectsRunIDMismatch(t *testing.T) {
 func TestSaveArtifact_RequiresServiceRole(t *testing.T) {
 	tokens := auth.NewTokenService(auth.Config{JWTSecret: []byte("g2-orch-secret")})
 	s, _, _, _ := newArtifactServer(t, tokens)
-	runID := submitJob(t, s, "artifact-auth", runSpecA)
+	service := mustServiceToken(t, tokens)
+	runID := submitJobAs(t, s, service, "artifact-auth", runSpecA)
 	path := "/api/runs/jobs/" + runID + "/artifacts"
 
 	code, body := doAuth(t, s, http.MethodPost, path, artifactBody("p1"), "")
@@ -144,7 +145,6 @@ func TestSaveArtifact_RequiresServiceRole(t *testing.T) {
 	code, body = doAuth(t, s, http.MethodPost, path, artifactBody("p1"), viewer)
 	wantCode(t, code, body, http.StatusForbidden, "forbidden")
 
-	service := mustServiceToken(t, tokens)
 	code, body = doAuth(t, s, http.MethodPost, path, artifactBody("p1"), service)
 	if code != http.StatusCreated {
 		t.Fatalf("service write = %d, want 201 (body %s)", code, body)
@@ -156,25 +156,68 @@ func TestArtifactWriteFailsClosedWithoutAuthorizer(t *testing.T) {
 	clock := func() time.Time { return now }
 	m := queue.NewMemory(queue.MemoryOptions{Now: clock})
 	s := New(m, WithArtifacts(queue.NewMemoryArtifacts(m, queue.MemoryOptions{Now: clock})))
-	runID := submitJob(t, s, "artifact-unwired", runSpecA)
-	code, body := do(t, s, http.MethodPost, "/api/runs/jobs/"+runID+"/artifacts", artifactBody("p1"))
+	// 全量 R5 后每条路由都过鉴权闸：未装配 Authorizer 时，鉴权在 handler 之前
+	// 就回 503，故不需要真实 run（本用例测的是「闸在不在」，不是业务校验）。
+	code, body := do(t, s, http.MethodPost, "/api/runs/jobs/artifact-unwired/artifacts", artifactBody("p1"))
 	wantCode(t, code, body, http.StatusServiceUnavailable, "auth_unavailable")
 }
 
-func TestArtifactWritePolicyIsServiceOnly(t *testing.T) {
+func TestPolicyCoversAllRoutesAsService(t *testing.T) {
+	// 全量 R5 的路由普查：每一条 /api/* 都必须先过鉴权闸（无凭证 = 401），
+	// 且策略表逐条登记为 service。新增路由不改这里 + 策略表 ⇒ 这条会红。
+	routes := []struct{ method, path, key string }{
+		{http.MethodPost, "/api/runs/jobs", "POST /api/runs/jobs"},
+		{http.MethodGet, "/api/runs/jobs", "GET /api/runs/jobs"},
+		{http.MethodGet, "/api/runs/jobs/x", "GET /api/runs/jobs/{id}"},
+		{http.MethodDelete, "/api/runs/jobs/x", "DELETE /api/runs/jobs/{id}"},
+		{http.MethodPost, "/api/runs/parents", "POST /api/runs/parents"},
+		{http.MethodGet, "/api/runs/parents/x", "GET /api/runs/parents/{id}"},
+		{http.MethodGet, "/api/runs/x/provenance", "GET /api/runs/{rest...}"},
+		{http.MethodPost, "/api/runs/jobs/x/artifacts", "POST /api/runs/jobs/{id}/artifacts"},
+		{http.MethodGet, "/api/runs/workers", "GET /api/runs/workers"},
+		{http.MethodPost, "/api/runs/workers", "POST /api/runs/workers"},
+		{http.MethodPost, "/api/runs/workers/x/heartbeat", "POST /api/runs/workers/{id}/heartbeat"},
+		{http.MethodPost, "/api/runs/workers/x/claim", "POST /api/runs/workers/{id}/claim"},
+		{http.MethodPost, "/api/runs/workers/x/drain", "POST /api/runs/workers/{id}/drain"},
+		{http.MethodPost, "/api/runs/jobs/x/lease", "POST /api/runs/jobs/{id}/lease"},
+		{http.MethodPost, "/api/runs/jobs/x/result", "POST /api/runs/jobs/{id}/result"},
+		{http.MethodPost, "/api/runs/jobs/x/cancel-ack", "POST /api/runs/jobs/{id}/cancel-ack"},
+	}
+
+	tokens := auth.NewTokenService(auth.Config{JWTSecret: []byte("g2-orch-secret")})
+	clock := func() time.Time { return baseTime }
+	m := queue.NewMemory(queue.MemoryOptions{Now: clock})
+	reg := queue.NewMemoryRegistry(queue.RegistryOptions{Now: clock})
+	s := New(m,
+		WithParents(queue.NewMemoryParents(queue.MemoryOptions{Now: clock})),
+		WithArtifacts(queue.NewMemoryArtifacts(m, queue.MemoryOptions{Now: clock})),
+		WithWorkers(reg),
+		WithAuthorizer(NewAuthorizer(tokens)),
+	)
+
 	entries := PolicyEntries()
-	rule, ok := entries["POST /api/runs/jobs/{id}/artifacts"]
-	if !ok {
-		t.Fatalf("write route has no policy entry: %v", entries)
+	if len(entries) != len(routes) {
+		t.Fatalf("policy entries = %d, want %d (route census)", len(entries), len(routes))
 	}
-	if len(rule.Roles) != 1 || rule.Roles[0] != auth.ServiceRole {
-		t.Fatalf("roles = %v, want [service]", rule.Roles)
+	for _, rt := range routes {
+		key := rt.key
+		rule, ok := entries[key]
+		if !ok {
+			t.Fatalf("route %q has no policy entry", key)
+		}
+		if len(rule.Roles) != 1 || rule.Roles[0] != auth.ServiceRole {
+			t.Fatalf("%s roles = %v, want [service]", key, rule.Roles)
+		}
+
+		req := httptest.NewRequest(rt.method, rt.path, strings.NewReader(`{}`))
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s without token = %d, want 401 (gate not applied)", key, rec.Code)
+		}
 	}
-	if len(entries) != 1 {
-		t.Fatalf("policy grew beyond the R5 minimal surface: %v", entries)
-	}
-	if AuthStatus != "write-endpoint-only" {
-		t.Fatalf("AuthStatus = %q, want write-endpoint-only", AuthStatus)
+	if AuthStatus != "all-endpoints-service" {
+		t.Fatalf("AuthStatus = %q, want all-endpoints-service", AuthStatus)
 	}
 }
 

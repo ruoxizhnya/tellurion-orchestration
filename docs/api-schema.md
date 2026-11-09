@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-11-09
-verified-by: SVC-ORCH-G1 契约收编（claim / provenance / 父作业请求三类 wire 形状改引 `contracts/run`，本仓与 core 不再各持一份；全量 R5 仍未启用）；SVC-ORCH-G4（`/healthz` / `/readyz` 分工）；SVC-ORCH-G2（artifact 写端点 `POST /api/runs/jobs/{id}/artifacts` + R5 最小面 service 角色 + 新码 `artifact_conflict` / `artifact_not_found` / `auth_unavailable`）；2026-10-25 施工 ⑪（X5c worker 打活面）
+verified-by: SVC-ORCH-G1 契约收编 + 全量 R5（claim / provenance / 父作业请求三类 wire 形状改引 `contracts/run`；`/api/*` 16 条路由全部 service 角色，公开面只有 `/healthz` / `/readyz`）；SVC-ORCH-G4（`/healthz` / `/readyz` 分工）；SVC-ORCH-G2（artifact 写端点 `POST /api/runs/jobs/{id}/artifacts` + 新码 `artifact_conflict` / `artifact_not_found` / `auth_unavailable`）；2026-10-25 施工 ⑪（X5c worker 打活面）
 ---
 
 # API Schema — tellurion-orchestration
@@ -255,10 +255,10 @@ verified-by: SVC-ORCH-G1 契约收编（claim / provenance / 父作业请求三�
 - **不接管 core 的旧端点**：`/api/backtest`、`/api/batch`、`/api/walkforward` 在 O0 切换前仍归 core；本仓的 `/api/runs/*` 是目标面，不反向代理旧路径（双真相见 §9.7 R1）。
 - **不解析 `backtest_jobs.result` 的错误串**、不重算 `status`：K9 的 `status` 由引擎产出，本仓原样透传。
 
-## 6. 鉴权现状（R5 最小面，2026-11-07）
+## 6. 鉴权现状（全量 R5，2026-11-09）
 
-- **代码登记**：`internal/httpapi/policy.go` 的 `AuthStatus = "write-endpoint-only"` 与策略表（只有一条：`POST /api/runs/jobs/{id}/artifacts` → `service` 角色）。
-- **只保护写端点**的原因：这是本仓唯一「机器代外部写入 `run.*`」的入口（裁决 ⑱），不能裸奔。其余端点的全量鉴权归 `SVC-ORCH-G1`（🔶 2026-11-09：契约形状已收编，全量 R5 尚未启用——调用方还没注入 service token，单侧启用会断链），今天仍无鉴权——**不是遗漏，是已登记的欠账**。
+- **代码登记**：`internal/httpapi/policy.go` 的 `AuthStatus = "all-endpoints-service"` 与策略表（`/api/*` 全部 16 条路由 → `service` 角色）。
+- **全量 R5（2026-11-09，`SVC-ORCH-G1`）**：每一条 `/api/*` 路由都过 `requireAuth`——未装配鉴权 → 503 `auth_unavailable`，无凭证 → 401，角色不足 → 403。公开面只有进程入口的 `/healthz`（进程活着）与 `/readyz`（装配齐）。`service` 是**服务间**角色：core worker（领取 / 续租 / 上报 / artifact）与 analytics（父作业提交 / 查询）持同一档；真人今天走 core 入口，不直连本仓。
 - **wire 形状归 contracts（2026-11-09）**：claim / provenance / 父作业提交三类形状已统一为 `contracts/run`（`ClaimView` / `ProvenanceView` / `ParentSubmitRequest` 族），本仓与 core 不再各写一份；§1 的字段表仍是对外行为描述，形状的唯一 Go 实现在契约包。
 - **fail-closed**：受保护路由未装配 Authorizer → `503 auth_unavailable`；无凭证 → `401 unauthenticated`；非 service → `403 forbidden`。启动闸同 core：有 `JWT_SECRET` 启用；无 secret + 回环 = 开放；无 secret + 非回环 = 拒绝启动。
 - **service token 的签发 / 分发不在本仓**：归 `tellurion:QT-77`；本仓只校验。

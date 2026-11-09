@@ -88,21 +88,20 @@ func New(q queue.JobQueue, opts ...Option) *Server {
 			}
 		}
 	}
-	s.mux.HandleFunc("POST /api/runs/jobs", s.submit)
-	s.mux.HandleFunc("GET /api/runs/jobs", s.list)
-	s.mux.HandleFunc("GET /api/runs/jobs/{id}", s.get)
-	s.mux.HandleFunc("DELETE /api/runs/jobs/{id}", s.cancel)
+	s.mux.HandleFunc("POST /api/runs/jobs", s.guarded(s.submit))
+	s.mux.HandleFunc("GET /api/runs/jobs", s.guarded(s.list))
+	s.mux.HandleFunc("GET /api/runs/jobs/{id}", s.guarded(s.get))
+	s.mux.HandleFunc("DELETE /api/runs/jobs/{id}", s.guarded(s.cancel))
 	if s.psvc != nil {
-		s.mux.HandleFunc("POST /api/runs/parents", s.submitParent)
-		s.mux.HandleFunc("GET /api/runs/parents/{id}", s.getParent)
+		s.mux.HandleFunc("POST /api/runs/parents", s.guarded(s.submitParent))
+		s.mux.HandleFunc("GET /api/runs/parents/{id}", s.guarded(s.getParent))
 	}
 	if s.artifacts != nil {
 		// catch-all 而不是 `GET /api/runs/{id}/provenance`：后者与
 		// `GET /api/runs/parents/{id}` 在 `/api/runs/parents/provenance` 上冲突
 		// （互不更具体 ⇒ 注册期 panic）。jobs / parents 都比它具体，仍优先。
-		s.mux.HandleFunc("GET /api/runs/{rest...}", s.provenance)
-		// X0 生产者（裁决 ⑱）：唯一写路径 + R5 最小面（service 角色）。
-		// 未装配 Authorizer 时 requireAuth 回 503——写端点不允许裸奔。
+		s.mux.HandleFunc("GET /api/runs/{rest...}", s.guarded(s.provenance))
+		// X0 生产者（裁决 ⑱）：唯一写路径。
 		s.mux.Handle("POST /api/runs/jobs/{id}/artifacts", s.requireAuth(http.HandlerFunc(s.saveArtifact)))
 	}
 	if s.workers != nil {

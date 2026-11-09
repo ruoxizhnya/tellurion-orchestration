@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-11-09
-verified-by: SVC-ORCH-G1 契约收编（2026-11-09：`contracts v0.9.0` 远端可解析、claim/provenance/父作业请求改引 `contracts/run`、逐字节 golden 三条、core 客户端同批收编；全量 R5 仍欠）；SVC-ORCH-G4 ✅；SVC-ORCH-G2 ✅
+verified-by: SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析、claim/provenance/父作业请求改引 `contracts/run`、逐字节 golden 三条、core 客户端与 analytics 调用方同批收编、全量 R5 16 条路由 service 角色 + 路由普查守卫）；SVC-ORCH-G4 ✅；SVC-ORCH-G2 ✅
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -36,7 +36,7 @@ verified-by: SVC-ORCH-G1 契约收编（2026-11-09：`contracts v0.9.0` 远端�
 > - **破坏验证**：临时给 `orchestration` 加 `depends_on: missing-svc` → `config -q` 退出 1（`service "orchestration" depends on undefined service "missing-svc"`）→ 逐字节还原后复绿（exit 0，SHA256 一致）。
 > - **如实登记**：未改队列/worker 语义；`go.mod` 仍只有 pgx，未引 contracts / kit；`run_artifacts` 生产者与子 run 入队等仍属 G3。
 
-### SVC-ORCH-G1 · 契约化与鉴权（ADR-036 G1）[P0] 🔶（2026-11-09：契约收编已落，全量 R5 未启用）
+### SVC-ORCH-G1 · 契约化与鉴权（ADR-036 G1）[P0] ✅（2026-11-09）
 
 - **① 目标**：本仓的 wire 形状进 contracts，服务间调用用 kit service token，不再靠 core/本仓各写一份 DTO。
 - **② 上下文**：今天 `go.mod` 只有 pgx；core `internal/orchestrationworker` 与本仓各写一套 claim/job 结构。
@@ -54,9 +54,17 @@ verified-by: SVC-ORCH-G1 契约收编（2026-11-09：`contracts v0.9.0` 远端�
 > - **core 腿（同批，属 `SVC-CORE-RUN-RETIRE` 客户端腿）**：`internal/orchestrationworker/client.go` 删 `ClaimedJob` → `run.ClaimView`，`loop.go` 的 `execute` 签名与 `worker_test.go` 同步。
 > - **逐字节证据**：新增 `internal/httpapi/contract_shapes_test.go` 三条冻结用例——claim（普通 run 无 `parent_job_id` 键 / 子 run 键在末尾）、provenance（15 字段，五个可空位显式 `null`）、父作业请求往返；任何字段重排 / 加 `omitempty` / 可空变省略键都会红。
 > - **门禁实测（2026-11-09）**：orchestration `go build ./...` = 0、`go vet ./...` = 0、`go test ./... -count=1` = 0（8 个包 ok）、`gofmt -l .` 空；core `go build ./...` = 0、`go vet ./internal/orchestrationworker/...` = 0、`go test ./internal/orchestrationworker/... -count=1` = 0。
-> - **未完成（如实，不写成已完成）**：**全量 R5 未启用**——策略表仍只有 `POST /api/runs/jobs/{id}/artifacts` 一条（`internal/httpapi/policy.go`），其余路由无鉴权。原因：调用方（core `orchestrationworker.Client`、analytics `internal/upstream`）尚未注入 service token，单侧启用会直接断链；"service token 可调用"今天只在 artifact 写端点成立。⇒ 本单保持 🔶，全量 R5 需要跨仓同批（本仓策略表 + core/analytics 客户端带 token + 部署注入）。
+> - **未完成（如实，不写成已完成）**：无——全量 R5 已于同日收口（见下条）。
+>
+> **施工记录（2026-11-09，全量 R5 收口，本单结案）**：
+> - **本仓**：`policy.go` 的 `AuthStatus` 改 `all-endpoints-service`，策略表覆盖 `/api/*` 全部 16 条路由（worker 面 / 作业面 / 父作业面 / provenance / artifact 写面），全部 `service` 角色；`api.go` / `workers.go` 每条路由经 `s.guarded(...)` 过 `requireAuth`。公开面只有进程入口的 `/healthz` / `/readyz`（不进本包 mux）。
+> - **调用方（跨仓，同批）**：core `internal/orchestrationworker.Client` 新增 `Token`，`do()` 统一注入 `Authorization`；`cmd/worker` 新增 `-orchestration-token` / `ORCHESTRATION_SERVICE_TOKEN`。analytics `upstream.NewSensitivityQueueWithToken` + `-orchestration-token` / `ANALYTICS_ORCHESTRATION_TOKEN`（缺省读 `ORCHESTRATION_SERVICE_TOKEN`）；`cmd/analyticsservice` 已切。
+> - **部署**：core `docker-compose.yml` 的 worker 面注入 `ORCHESTRATION_SERVICE_TOKEN`；`docker-compose.services.yml` 的 analytics 注入 `ANALYTICS_ORCHESTRATION_TOKEN`（均空占位，签法见 core `docs/SPEC.md#服务间凭证`）。
+> - **守卫测试**：`TestPolicyCoversAllRoutesAsService` 是**路由普查**——16 条路由逐条断言「策略表有 service 角色 + 无凭证 = 401」，新增路由不改策略表即红。
+> - **门禁实测（2026-11-09）**：本仓 build / vet / test 全 `EXIT=0`、`gofmt -l .` 空；core `go build ./...` = 0、`go vet ./internal/orchestrationworker/... ./cmd/worker/...` = 0、对应 `go test -count=1` = 0；analytics build / vet / test 全 0。
+> - **破坏验证（真做真还原）**：把 `GET /api/runs/jobs` 的 `s.guarded(...)` 摘掉 → `TestPolicyCoversAllRoutesAsService` 红（无凭证从 401 变 200）；逐行还原后复绿，`go test ./internal/httpapi -count=1` = 0。
 
-### SVC-ORCH-G3 · core 任务面切换与旧 job 实现退役（ADR-036）[P0] ⛔（2026-10-26 复核：等 B 组退役单）
+### SVC-ORCH-G3 · core 任务面切换与旧 job 实现退役（ADR-036）[P0] 🔶（2026-11-09 复核：三条前置全部满足，可开工）
 
 - **① 目标**：core 所有异步任务创建走本仓；core `pkg/backtest/job` / `batch` 的旧写路径退役；`X5b` 关闭。
 - **② 上下文**：core 仍可直跑并写裸表 `backtest_jobs`；`cmd/worker` 从本仓领活后又写回 core `backtest_jobs`；两套任务真相并存。
@@ -68,6 +76,8 @@ verified-by: SVC-ORCH-G1 契约收编（2026-11-09：`contracts v0.9.0` 远端�
 > **⛔ 开工前置复核（2026-10-26，未开工）**：等 B 组 `SVC-CORE-RUN-RETIRE` 立单；本仓台账仍未落的 `run_artifacts` 生产者（写端点 + R5 鉴权）、worker 进程/端点、子 run 入队均依赖前置 2（contracts 编排形状）。本轮未自造 wire 形状，未改 worker 语义。
 >
 > ⚠️ **本行三处已于同日实测订正（2026-10-26 账实核对）**：① `SVC-CORE-RUN-RETIRE` **已立单**——`tellurion:docs/TASKS.md:121`「六之二」，串行第 5，所以它不再是本单的阻塞前置；② **「子 run 入队」已落**——`internal/parents/service.go:143` 的 `enqueueChildren` 是 `run.backtest_jobs.parent_job_id` 的唯一写入方（`:148` 填 `ParentJobID`），本文件 G3 ① 自己也记了 ✅（2026-10-25），把它列进「未落」是自相矛盾；③ 真正未落的三条**复核后仍成立**：`internal/httpapi/` 下**没有** `auth.go` / `policy.go`（R5 鉴权未接）、**没有** `POST …/artifacts` 路由（只有 `GET …/provenance` 读面），worker 进程在 core（`tellurion:cmd/worker`）而非本仓。⇒ 本单的剩余前置是 **contracts 编排形状（`CT-04`）+ R5 + artifact 写端点**，不是「等退役单」。
+>
+> **前置解除（2026-11-09，实测）**：三条剩余前置已全部满足——① `CT-04` 结案且 `contracts v0.9.0` 远端可解析（见 `SVC-ORCH-G1`）；② 全量 R5 已落（同上，16 条路由 service 角色）；③ `POST /api/runs/jobs/{id}/artifacts` 已在 `SVC-ORCH-G2` 落地。⇒ 本单从 ⛔ 转 🔶，可以开工；施工顺序仍是「core analysis 异步入口改调本仓 → core 裸表零新增 → 存量迁移 → 删 core 本地队列写路径 → UI/openapi 同步」。
 
 ### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] 🔶
 

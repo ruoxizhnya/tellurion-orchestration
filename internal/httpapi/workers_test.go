@@ -23,7 +23,7 @@ func newWorkerServer(t *testing.T) (*Server, *queue.Memory, *queue.MemoryRegistr
 	reg := queue.NewMemoryRegistry(queue.RegistryOptions{Now: now})
 	jobs := queue.NewMemory(queue.MemoryOptions{Now: now, Workers: reg})
 	parents := queue.NewMemoryParents(queue.MemoryOptions{Now: now})
-	s := New(jobs, WithParents(parents), WithWorkers(reg))
+	s := New(jobs, WithParents(parents), WithWorkers(reg), WithAuthorizer(allowAllAuthorizer{}))
 	return s, jobs, reg, &clock
 }
 
@@ -110,7 +110,7 @@ func (r *recordingRegistry) Register(ctx context.Context, w queue.WorkerRecord) 
 func TestRegisterWorker_HandsNilKernelsToRegistry(t *testing.T) {
 	reg := &recordingRegistry{WorkerRegistry: queue.NewMemoryRegistry()}
 	jobs := queue.NewMemory(queue.MemoryOptions{Now: func() time.Time { return baseTime }, Workers: reg})
-	s := New(jobs, WithWorkers(reg))
+	s := New(jobs, WithWorkers(reg), WithAuthorizer(allowAllAuthorizer{}))
 
 	registerWorker(t, s, "w-empty", `[]`)
 	if reg.last.Kernels != nil {
@@ -198,7 +198,7 @@ func TestWithWorkers_PanicsWithoutKernelAwareQueue(t *testing.T) {
 			t.Fatal("New did not panic: worker assembly without ClaimByKernel must be refused")
 		}
 	}()
-	New(plainQueue{jobs}, WithWorkers(reg))
+	New(plainQueue{jobs}, WithWorkers(reg), WithAuthorizer(allowAllAuthorizer{}))
 }
 
 func TestRenewLease_AndFencing(t *testing.T) {
@@ -421,6 +421,7 @@ func TestWorkerRoutes_NotStolenByProvenanceCatchAll(t *testing.T) {
 		WithParents(queue.NewMemoryParents(queue.MemoryOptions{Now: now})),
 		WithArtifacts(queue.NewMemoryArtifacts(jobs, queue.MemoryOptions{Now: now})),
 		WithWorkers(reg),
+		WithAuthorizer(allowAllAuthorizer{}),
 	)
 	doWant(t, s, "GET", "/api/runs/workers", "", 200, "")
 }

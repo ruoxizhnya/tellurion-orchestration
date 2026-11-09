@@ -65,14 +65,14 @@ func WithWorkers(reg queue.WorkerRegistry, opts ...WorkerOptions) Option {
 }
 
 func (s *Server) registerWorkerRoutes() {
-	s.mux.HandleFunc("GET /api/runs/workers", s.listWorkers)
-	s.mux.HandleFunc("POST /api/runs/workers", s.registerWorker)
-	s.mux.HandleFunc("POST /api/runs/workers/{id}/heartbeat", s.heartbeatWorker)
-	s.mux.HandleFunc("POST /api/runs/workers/{id}/claim", s.claimJob)
-	s.mux.HandleFunc("POST /api/runs/workers/{id}/drain", s.drainWorker)
-	s.mux.HandleFunc("POST /api/runs/jobs/{id}/lease", s.renewLease)
-	s.mux.HandleFunc("POST /api/runs/jobs/{id}/result", s.reportResult)
-	s.mux.HandleFunc("POST /api/runs/jobs/{id}/cancel-ack", s.ackCancel)
+	s.mux.HandleFunc("GET /api/runs/workers", s.guarded(s.listWorkers))
+	s.mux.HandleFunc("POST /api/runs/workers", s.guarded(s.registerWorker))
+	s.mux.HandleFunc("POST /api/runs/workers/{id}/heartbeat", s.guarded(s.heartbeatWorker))
+	s.mux.HandleFunc("POST /api/runs/workers/{id}/claim", s.guarded(s.claimJob))
+	s.mux.HandleFunc("POST /api/runs/workers/{id}/drain", s.guarded(s.drainWorker))
+	s.mux.HandleFunc("POST /api/runs/jobs/{id}/lease", s.guarded(s.renewLease))
+	s.mux.HandleFunc("POST /api/runs/jobs/{id}/result", s.guarded(s.reportResult))
+	s.mux.HandleFunc("POST /api/runs/jobs/{id}/cancel-ack", s.guarded(s.ackCancel))
 }
 
 type workerRegisterRequest struct {

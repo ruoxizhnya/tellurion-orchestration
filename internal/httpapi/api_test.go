@@ -17,7 +17,7 @@ var baseTime = time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 
 func newServer() (*Server, *queue.Memory) {
 	m := queue.NewMemory(queue.MemoryOptions{Now: func() time.Time { return baseTime }})
-	return New(m), m
+	return New(m, WithAuthorizer(allowAllAuthorizer{})), m
 }
 
 func do(t *testing.T, s *Server, method, path, body string) (int, string) {
@@ -61,8 +61,14 @@ const runSpecA = `{"kernel":"default","symbol":"600000.SH"}`
 // submitJob 走 HTTP 提交一条并断言 202；返回 job_id。
 func submitJob(t *testing.T, s *Server, key, runSpec string) string {
 	t.Helper()
+	return submitJobAs(t, s, "", key, runSpec)
+}
+
+// submitJobAs 与 submitJob 相同，但带凭证。启用鉴权的用例（全量 R5）用它。
+func submitJobAs(t *testing.T, s *Server, token, key, runSpec string) string {
+	t.Helper()
 	body := fmt.Sprintf(`{"idempotency_key":%q,"run_spec":%s}`, key, runSpec)
-	code, resp := do(t, s, "POST", "/api/runs/jobs", body)
+	code, resp := doAuth(t, s, "POST", "/api/runs/jobs", body, token)
 	if code != 202 {
 		t.Fatalf("submit %s: status = %d, want 202 (body %s)", key, code, resp)
 	}
@@ -154,7 +160,7 @@ func TestSubmit_QueueFull(t *testing.T) {
 		Now:           func() time.Time { return baseTime },
 		MaxQueueDepth: 1,
 	})
-	s := New(m)
+	s := New(m, WithAuthorizer(allowAllAuthorizer{}))
 	submitJob(t, s, "k1", runSpecA)
 	body := `{"idempotency_key":"k2","run_spec":` + runSpecA + `}`
 	doWant(t, s, "POST", "/api/runs/jobs", body, 429, "queue_full")
