@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-11-09
-verified-by: SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析、claim/provenance/父作业请求改引 `contracts/run`、逐字节 golden 三条、core 客户端与 analytics 调用方同批收编、全量 R5 16 条路由 service 角色 + 路由普查守卫）；SVC-ORCH-G4 ✅；SVC-ORCH-G2 ✅
+last-verified: 2026-11-10
+verified-by: SVC-ORCH-G3 ⑤-4 取证（2026-11-10：真 orchestration 进程 + 真 PG 的 batch 2 子 run 与 walkforward 3 窗 / 6 段同轮 PASS，`go test ./internal/orchestrationworker -count=1 -v` EXIT=0；破坏验证真做真还原；真引擎 + 真行情仍未跑，本单保持 🔶）；SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析、claim/provenance/父作业请求改引 `contracts/run`、逐字节 golden 三条、core 客户端与 analytics 调用方同批收编、全量 R5 16 条路由 service 角色 + 路由普查守卫）；SVC-ORCH-G4 ✅；SVC-ORCH-G2 ✅
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -96,6 +96,12 @@ verified-by: SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析�
 > **施工记录（2026-11-10，收尾复核：⑤-1 / ⑤-2 取证，仍不翻 ✅）**：core `SVC-CORE-RUN-RETIRE` ③ 于 2026-11-10 落地（`tellurion` commit `2a01d77`）——`pkg/backtest` 持久化改为接口注入，**生产侧** `"tellurion/pkg/storage"` import = **0**（`git grep -n '"tellurion/pkg/storage"' -- 'pkg/backtest/**/*.go' ':!*_test.go'` → 零命中、EXIT=1），护栏 `internal/repoguard/TestBacktestDoesNotImportStorage` 绿。core 非测试代码里 `backtest_jobs` 共 **30 处**，逐行核对后**全为注释**，唯一非注释命中是 Migration 065 的 `DROP TABLE IF EXISTS backtest_jobs`（`tellurion:pkg/storage/postgres.go:647`）；读写点 = 0，护栏 `TestBacktestJobsPersistenceIsRetired` 绿。⇒ ⑤-1「core `pkg/backtest` 对本仓引用符合契约」与 ⑤-2「core 裸表 `backtest_jobs` 零新增」已取证（当场实测：`ok tellurion/internal/repoguard 0.205s`）。
 >
 > **仍未满足（如实，不把 🔶 翻成 ✅）**：⑤-3「同批 run 新旧路径结果一致」在旧本地队列已删（Migration 065）之后**已无法按字面执行**——没有旧路径可对照。替代证据是 `tellurion:cmd/analysis/orchestration_jobs_test.go` 的 run_spec 映射 8 条用例（只翻新执行路径真正消费的字段，手续费/滑点/策略参数不翻，避免口径漂移），属**代裁，待主任追认**；⑤-4「X5b 关闭」需要 orchestration 进程 + 真 PG + 数据的端到端 batch/walkforward 真跑取证，本轮**未跑**。本单保持 🔶，不写成已完成。
+>
+> **施工记录（2026-11-10，第八腿：⑤-4 的 batch + walkforward 双真跑取证，仍不翻 ✅）**：core `internal/orchestrationworker/wire_e2e_test.go` 新增 `TestWireWalkForwardWithRealOrchestrationProcess`（core commit `fef9027`）。真 orchestration 进程（`ORCHESTRATION_REPO`，`startOrchestration` 现场 rebuild 二进制）+ 真 PG（`ORCHESTRATION_TEST_DSN` → 一次性库 `tellurion_orch_e2e`）：10 个交易日、`train_days=3 / test_days=2 / step_days=2` 切 **3 窗**，每窗 train/test 两段共 **6 条子 run**；core 的 `orchestrationworker.Loop` 以 `core-worker-wf-e2e` 注册后全部领完→回报，父记录 `status=completed`、`counts.completed=3`、`counts.settled=3`（按**窗口**计数而非按段），`summary.Windows` 三条齐全（`window=1..3`、`status=completed`、train/test `run_id` 非空）。
+> - **实跑**：同一库内与既有 batch 用例（2 子 run）同轮跑 `go test ./internal/orchestrationworker -count=1 -v` → **PASS / EXIT=0**（`ok tellurion/internal/orchestrationworker 4.671s`；三条真进程用例分别 1.49s / 1.58s / 1.49s，含 `TestWireControlPlaneWithRealOrchestrationProcess`）。core 侧门禁：`go build ./...` / `go vet ./...` / `go test ./... -count=1` 退出码 **0 / 0 / 0**。
+> - **破坏验证（真做真还原）**：把 `tellurion-orchestration:internal/plan/aggregate.go` 的 `WindowCompleted` 值 `completed` 改成 `complete` ⇒ 现场重建的 orchestration 二进制下用例红（`wire_e2e_test.go:155 window 1 = … Status:complete`，EXIT=1）；从备份逐字节还原（SHA256 `86CFD1C804773AE7C5E5619D6FD0DAC20F051BCBF2D3A2E541D8B169ECA6B9DD`、`git status` clean）后同一命令复绿。
+> - **仍未满足（如实）**：本腿 runner 是 `echoRunner`（协议 + 父汇总 + 窗口切分腿），**真引擎 + 真行情数据**的 batch/walkforward 未跑——core 数据面已随 `SVC-CORE-DATA-RETIRE` 退役，需要 data 服务 + 行情夹具才能补；⑤-3 的替代证据仍是代裁。本单保持 🔶。
+> - **环境注记（非代码缺陷）**：父记录身份是 `plan_hash`，同一计划在同一库上重投会返回 200 `idempotent_replay` 而非 202 ⇒ 每个测试轮换新库；本轮数据库已 `DROP`（`pg_database` 复查无残留）。
 
 ### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] 🔶
 
