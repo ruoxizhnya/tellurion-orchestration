@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-11-10
-verified-by: SVC-ORCH-G3 ⑤-4 取证（2026-11-10：真 orchestration 进程 + 真 PG 的 batch 2 子 run 与 walkforward 3 窗 / 6 段同轮 PASS，`go test ./internal/orchestrationworker -count=1 -v` EXIT=0；破坏验证真做真还原；真引擎 + 真行情仍未跑，本单保持 🔶）；SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析、claim/provenance/父作业请求改引 `contracts/run`、逐字节 golden 三条、core 客户端与 analytics 调用方同批收编、全量 R5 16 条路由 service 角色 + 路由普查守卫）；SVC-ORCH-G4 ✅；SVC-ORCH-G2 ✅
+verified-by: SVC-ORCH-G3 ✅（2026-11-10 收口：真栈真引擎 + 真行情跑通 batch 2 子 run 与 walkforward 1 窗 2 段，父记录双 `completed`、子结果含真实 metrics/`portfolio_values`；同轮取证 ⑤-1/⑤-2；⑤-3 为已登记代裁，待主任追认）；SVC-ORCH-G3 ⑤-4 取证（2026-11-10：真 orchestration 进程 + 真 PG 的 batch 2 子 run 与 walkforward 3 窗 / 6 段同轮 PASS，`go test ./internal/orchestrationworker -count=1 -v` EXIT=0；破坏验证真做真还原；该腿 runner 为 echoRunner）；SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析、claim/provenance/父作业请求改引 `contracts/run`、逐字节 golden 三条、core 客户端与 analytics 调用方同批收编、全量 R5 16 条路由 service 角色 + 路由普查守卫）；SVC-ORCH-G4 ✅；SVC-ORCH-G2 ✅
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -64,7 +64,7 @@ verified-by: SVC-ORCH-G3 ⑤-4 取证（2026-11-10：真 orchestration 进程 + 
 > - **门禁实测（2026-11-09）**：本仓 build / vet / test 全 `EXIT=0`、`gofmt -l .` 空；core `go build ./...` = 0、`go vet ./internal/orchestrationworker/... ./cmd/worker/...` = 0、对应 `go test -count=1` = 0；analytics build / vet / test 全 0。
 > - **破坏验证（真做真还原）**：把 `GET /api/runs/jobs` 的 `s.guarded(...)` 摘掉 → `TestPolicyCoversAllRoutesAsService` 红（无凭证从 401 变 200）；逐行还原后复绿，`go test ./internal/httpapi -count=1` = 0。
 
-### SVC-ORCH-G3 · core 任务面切换与旧 job 实现退役（ADR-036）[P0] 🔶（2026-11-09 复核：三条前置全部满足，可开工）
+### SVC-ORCH-G3 · core 任务面切换与旧 job 实现退役（ADR-036）[P0] ✅（2026-11-10 收口：真栈真引擎 + 真行情双形态跑通；⑤-3 代裁待主任追认）
 
 - **① 目标**：core 所有异步任务创建走本仓；core `pkg/backtest/job` / `batch` 的旧写路径退役；`X5b` 关闭。
 - **② 上下文**：core 仍可直跑并写裸表 `backtest_jobs`；`cmd/worker` 从本仓领活后又写回 core `backtest_jobs`；两套任务真相并存。
@@ -100,8 +100,17 @@ verified-by: SVC-ORCH-G3 ⑤-4 取证（2026-11-10：真 orchestration 进程 + 
 > **施工记录（2026-11-10，第八腿：⑤-4 的 batch + walkforward 双真跑取证，仍不翻 ✅）**：core `internal/orchestrationworker/wire_e2e_test.go` 新增 `TestWireWalkForwardWithRealOrchestrationProcess`（core commit `fef9027`）。真 orchestration 进程（`ORCHESTRATION_REPO`，`startOrchestration` 现场 rebuild 二进制）+ 真 PG（`ORCHESTRATION_TEST_DSN` → 一次性库 `tellurion_orch_e2e`）：10 个交易日、`train_days=3 / test_days=2 / step_days=2` 切 **3 窗**，每窗 train/test 两段共 **6 条子 run**；core 的 `orchestrationworker.Loop` 以 `core-worker-wf-e2e` 注册后全部领完→回报，父记录 `status=completed`、`counts.completed=3`、`counts.settled=3`（按**窗口**计数而非按段），`summary.Windows` 三条齐全（`window=1..3`、`status=completed`、train/test `run_id` 非空）。
 > - **实跑**：同一库内与既有 batch 用例（2 子 run）同轮跑 `go test ./internal/orchestrationworker -count=1 -v` → **PASS / EXIT=0**（`ok tellurion/internal/orchestrationworker 4.671s`；三条真进程用例分别 1.49s / 1.58s / 1.49s，含 `TestWireControlPlaneWithRealOrchestrationProcess`）。core 侧门禁：`go build ./...` / `go vet ./...` / `go test ./... -count=1` 退出码 **0 / 0 / 0**。
 > - **破坏验证（真做真还原）**：把 `tellurion-orchestration:internal/plan/aggregate.go` 的 `WindowCompleted` 值 `completed` 改成 `complete` ⇒ 现场重建的 orchestration 二进制下用例红（`wire_e2e_test.go:155 window 1 = … Status:complete`，EXIT=1）；从备份逐字节还原（SHA256 `86CFD1C804773AE7C5E5619D6FD0DAC20F051BCBF2D3A2E541D8B169ECA6B9DD`、`git status` clean）后同一命令复绿。
-> - **仍未满足（如实）**：本腿 runner 是 `echoRunner`（协议 + 父汇总 + 窗口切分腿），**真引擎 + 真行情数据**的 batch/walkforward 未跑——core 数据面已随 `SVC-CORE-DATA-RETIRE` 退役，需要 data 服务 + 行情夹具才能补；⑤-3 的替代证据仍是代裁。本单保持 🔶。
+> - **仍未满足（如实）**：本腿 runner 是 `echoRunner`（协议 + 父汇总 + 窗口切分腿），**真引擎 + 真行情数据**的 batch/walkforward 未跑——core 数据面已随 `SVC-CORE-DATA-RETIRE` 退役，需要 data 服务 + 行情夹具才能补；⑤-3 的替代证据仍是代裁。本单保持 🔶（该缺口已由第九腿补齐，见下条）。
 > - **环境注记（非代码缺陷）**：父记录身份是 `plan_hash`，同一计划在同一库上重投会返回 200 `idempotent_replay` 而非 202 ⇒ 每个测试轮换新库；本轮数据库已 `DROP`（`pg_database` 复查无残留）。
+
+> **施工记录（2026-11-10，第九腿：真引擎 + 真行情端到端，⑤-4 收口）**：补齐第八腿的缺口——不再用 `echoRunner`，起**真 data 服务（`127.0.0.1:8081`）+ 真 orchestration（`127.0.0.1:8088`）+ core `cmd/worker`（真回测引擎）**，五段栈共用一次性库 `tellurion_orch_wf_e2e`（data 启动自建 `market.*`，core store 迁移 `public.*` / `run.*`）。
+> - **行情夹具**：`market.ohlcv_daily_qfq` 播种 600519.SH / 000001.SZ 各 262 根日线（2023-06-01..2024-05-31 工作日）+ `market.stocks` 两行 + `market.trading_calendar` + `index_constituents`；价格用单调上升序列（保证 momentum 有正动量、能成交）。worker 环境 `BENCHMARK_INDEX_CODE=000300.SH`、`RISK_SERVICE_RESOLVE_ENABLED=false`（builtin 兜底）、空 `JWT_SECRET`。
+> - **batch 真跑**：`POST /api/runs/parents`（`grid={"lookback_days":[10,20]}`、2024-01-02..2024-04-26）→ 父 `5835eedb9e6c3d586f933f9760cd6eff` **status=completed、counts.completed=2、invalid=0、failed=0**，`plan_hash=4593a3a35d1f28fa…`；子 run `f917db35…`（lookback=10）`result_status=completed`、`total_return=0.0035788872686624527`、`total_trades=13`、`portfolio_values=84` 点；`b1042a60…`（lookback=20）`total_return=0.003097965319201583`、`total_trades=11`、84 点。`plan_canonical` 实测含两条 `strategy_params.lookback_days`，证明网格真展开、且子 run 真被引擎执行。
+> - **walkforward 真跑**：`train_days=40 / test_days=40 / step_days=40`、100 个交易日 → 父 `354950431a8b04cf2656b8b142e807c3` **status=completed、counts.completed=1、settled=1**，`plan_hash=e1ec95d78b721f1c…`；train 子 `e6e3dbaa…`（2024-01-02..02-26）`total_return=0.0009288463868410326`、`total_trades=4`、40 点；test 子 `efe16113…`（2024-02-27..04-22）`total_return=0.0009258984726524213`、`total_trades=4`、40 点。`plan_canonical` 的 `window` 四日期与两段 `request` 首尾相接、不重叠。
+> - **失败腿的如实登记（不是代码缺陷）**：首轮 batch/walkforward 子 run 被 `[INTERNAL] failed to load adjustment anchors: series drifted beyond a pure rebasing (symbol 000001.SZ)` 拒——因本轮为造正动量**中途 UPDATE 过历史日线**，与先前冻结的 `public.backtest_adjustment_anchors` 快照不一致（该护栏正是为检测「历史数据被改写」而存在）。清空锚点表后重跑即通过；说明写在这里，避免下次误判成编排缺陷。
+> - **窗口长度与 K9 的关系（实测）**：子 run 的数据切片从 `start_date` 起、不含前置预热，momentum 默认 `lookback=20` ⇒ 20 天以内的窗口必然 `zero_trades` → `invalid`（K9 无效，不是故障；首轮 3+2 天窗口即如此，父计数 `invalid`，第八腿的 echo runner 不走这条路径）。要拿 `completed` 必须让窗口长于策略 lookback。
+> - **收口判定**：⑤-1（core `pkg/backtest` 引用符合契约）、⑤-2（裸表 `backtest_jobs` 零新增）已于上文取证；⑤-4（`X5b` 关闭）由第八腿（协议/窗口/汇总，echo runner）与本腿（真引擎/真行情/真结果）共同成立；⑤-3（新旧路径结果一致）旧路径已随 Migration 065 删除、按已登记**代裁**以 run_spec 映射用例替代，**待主任追认**。据此本单翻 ✅。
+> - **清场**：3 个进程已 `Stop-Process`，8081 / 8088 无监听；`DROP DATABASE tellurion_orch_wf_e2e WITH (FORCE)` 成功、`pg_database` 复查 0；`%TEMP%` 的 `orchwf-*` 二进制/日志/夹具已删。
 
 ### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] 🔶
 
