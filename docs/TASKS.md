@@ -1,7 +1,7 @@
 ---
 status: active
 last-verified: 2026-11-10
-verified-by: SVC-ORCH-G3 ✅（2026-11-10 收口：真栈真引擎 + 真行情跑通 batch 2 子 run 与 walkforward 1 窗 2 段，父记录双 `completed`、子结果含真实 metrics/`portfolio_values`；同轮取证 ⑤-1/⑤-2；⑤-3 为已登记代裁，待主任追认）；SVC-ORCH-G3 ⑤-4 取证（2026-11-10：真 orchestration 进程 + 真 PG 的 batch 2 子 run 与 walkforward 3 窗 / 6 段同轮 PASS，`go test ./internal/orchestrationworker -count=1 -v` EXIT=0；破坏验证真做真还原；该腿 runner 为 echoRunner）；SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析、claim/provenance/父作业请求改引 `contracts/run`、逐字节 golden 三条、core 客户端与 analytics 调用方同批收编、全量 R5 16 条路由 service 角色 + 路由普查守卫）；SVC-ORCH-G4 ✅；SVC-ORCH-G2 ✅
+verified-by: QT-44 ✅（2026-11-10：X0 生产者 `analysisartifact.identityBody` → `POST /api/runs/jobs/{id}/artifacts` 真 run 写入三 hash；R5 鉴权由 SVC-ORCH-G2 ④ 补齐；worker 生产装配以真引擎 + 真行情 batch/walkforward 跑通；本仓零 import core 实测零命中；⑤-2 计数分歧为已登记代裁，待主任追认）；SVC-ORCH-G3 ✅（2026-11-10 收口：真栈真引擎 + 真行情跑通 batch 2 子 run 与 walkforward 1 窗 2 段，父记录双 `completed`、子结果含真实 metrics/`portfolio_values`；同轮取证 ⑤-1/⑤-2；⑤-3 为已登记代裁，待主任追认）；SVC-ORCH-G3 ⑤-4 取证（2026-11-10：真 orchestration 进程 + 真 PG 的 batch 2 子 run 与 walkforward 3 窗 / 6 段同轮 PASS，`go test ./internal/orchestrationworker -count=1 -v` EXIT=0；破坏验证真做真还原；该腿 runner 为 echoRunner）；SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析、claim/provenance/父作业请求改引 `contracts/run`、逐字节 golden 三条、core 客户端与 analytics 调用方同批收编、全量 R5 16 条路由 service 角色 + 路由普查守卫）；SVC-ORCH-G4 ✅；SVC-ORCH-G2 ✅
 ---
 
 # TASKS — tellurion-orchestration 未完成项
@@ -112,7 +112,7 @@ verified-by: SVC-ORCH-G3 ✅（2026-11-10 收口：真栈真引擎 + 真行情�
 > - **收口判定**：⑤-1（core `pkg/backtest` 引用符合契约）、⑤-2（裸表 `backtest_jobs` 零新增）已于上文取证；⑤-4（`X5b` 关闭）由第八腿（协议/窗口/汇总，echo runner）与本腿（真引擎/真行情/真结果）共同成立；⑤-3（新旧路径结果一致）旧路径已随 Migration 065 删除、按已登记**代裁**以 run_spec 映射用例替代，**待主任追认**。据此本单翻 ✅。
 > - **清场**：3 个进程已 `Stop-Process`，8081 / 8088 无监听；`DROP DATABASE tellurion_orch_wf_e2e WITH (FORCE)` 成功、`pg_database` 复查 0；`%TEMP%` 的 `orchwf-*` 二进制/日志/夹具已删。
 
-### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] 🔶
+### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] ✅（2026-11-10：随 SVC-ORCH-G3 收口，X0 生产者与 worker 装配缺口同日补齐）
 
 > **迁入说明（2026-10-21）**：本单自 core 仓 `tellurion:docs/TASKS.md`「五、X 线」迁入（任务台账批量重分布：X 线单展开到各服务仓为正式六字段单，「占位仓不写正式任务单」旧约定同时作废）。六字段正文逐字保留、不改写；core 侧同号条目已改为指针。
 >
@@ -237,8 +237,14 @@ verified-by: SVC-ORCH-G3 ✅（2026-11-10 收口：真栈真引擎 + 真行情�
 > 2. 声明内核时改调 `Claim`（绕过 `ClaimByKernel`，`_ = kq` 保语句合法）→ `TestClaim_FiltersByDeclaredKernels` 红：`w-go claimed …「kernel":"nautilus"」…`。
 > 3. `normalizeKernels` 的空数组分支改成 `return in, nil` → 第一版**假绿**：内存实现的 `Clone()` 会把非 nil 空切片洗成 nil，只断言 `List` 的结果测不到 HTTP 层。补 `recordingRegistry`（登记 `Register` 收到的原始记录、不 Clone）后 `TestRegisterWorker_HandsNilKernelsToRegistry` 红：`registry received kernels = []string{}, want nil`。**这是本轮发现并修掉的一条假护栏**。
 > **门禁（真实输出）**：`gofmt -l .` 空；`go build ./...` 退出 0；`go vet ./...` 退出 0；`go test ./... -count=1` 全绿（`cmd/orchestrationservice 0.370s`、`internal/httpapi 0.323s`（含 16 条 worker 用例）、`internal/parents 0.235s`、`internal/pgstore 0.290s`、`internal/plan 0.235s`、`internal/queue 0.250s`）；`ORCHESTRATION_TEST_DSN=… go test ./internal/pgstore -count=1` **PASS 6.673s**（语义套件 + 注册表 + 跨 port，全部跑过；skip ≠ pass）。本机 `-race` 仍跑不了（`CGO_ENABLED=0`、无 C 编译器）。
-> **未落（如实）**：① `run_artifacts` 的**生产者**——worker 进程已在 core（`tellurion:cmd/worker`），但它今天只上报 K9 结论与 `result_uri`，尚未把 core 的三 hash 写入本仓的 `run_artifacts`，本仓也没有对应的写入端点（X0 仍 🔶）；② 鉴权 R5 按裁-15 缓做，worker 身份仍只是一个 id；③ core worker 的生产装配仍有已知缺口（DataAdapter / 市场路由 / risk rules 取数口未搬，锚点 RunSpec 只能恢复 `backtest_jobs` 里有的字段）——见 `tellurion:docs/TASKS.md` QT-44 指针的施工记录。
-> **台账**：X5c ✅（2026-10-25）；X5b 的父汇总写回 ✅；QT-44 整体仍 🔶（X0 生产者 / 鉴权 R5）。
+> **未落（2026-10-25 状态；两项已于 2026-11-07 / 11-10 补齐，见下条收口记录）**：① `run_artifacts` 的**生产者**——worker 进程已在 core（`tellurion:cmd/worker`），但它今天只上报 K9 结论与 `result_uri`，尚未把 core 的三 hash 写入本仓的 `run_artifacts`，本仓也没有对应的写入端点（X0 仍 🔶）；② 鉴权 R5 按裁-15 缓做，worker 身份仍只是一个 id；③ core worker 的生产装配仍有已知缺口（DataAdapter / 市场路由 / risk rules 取数口未搬，锚点 RunSpec 只能恢复 `backtest_jobs` 里有的字段）——见 `tellurion:docs/TASKS.md` QT-44 指针的施工记录。
+> **台账**：X5c ✅（2026-10-25）；X5b 的父汇总写回 ✅。
+
+> **收口记录（2026-11-10，本单翻 ✅）**：
+> - **X0 生产者补齐**：`tellurion/internal/analysisartifact/publisher.go:285` 的 `identityBody` 组装 `queue.ArtifactRecord` 线形状，经 `Deliverer.SaveArtifact` → `POST /api/runs/jobs/{id}/artifacts`（`client.go:295-307`）写入；生产端在 `cmd/worker/main.go:125-133` 装配。真 run 取证见 core 台账 QT-78：orchestration `run.run_artifacts` 身份行 `artifact_uri=analysis:<run_id>`、`dataset_snapshot_hash=4fe097f7…`、`run_spec_hash=a730f8c4…`、`params_hash=c734a507…` 三 hash 非空。
+> - **鉴权 R5 补齐**：`SVC-ORCH-G2` ④ 已落 `internal/httpapi/auth.go` + `policy.go`（写端点 service-only），G2 ⑤④ 六条用例（无凭证 401 / viewer 403 / service 201 / 未装配 503）真跑通过。
+> - **worker 生产装配缺口补齐**：2026-11-10 第九腿以真 data 服务 + 真 orchestration + core 真回测引擎跑通 batch 2/2 与 walkforward 1/1（父记录 `completed`、子结果含真实 `portfolio_values` 与成交），锚点 RunSpec 的网格参数与窗口日期均被真实执行。
+> - **⑤ 逐条**：① 本仓 `go.mod` 只 require `tellurion-contracts v0.9.0` / `tellurion-kit v0.1.4`，全仓 `"tellurion/` 导入零命中（非测试与测试同扫）⇒ 零 import core；② 网格展开 / 窗口集合 / 逐 run 请求派生由 `internal/plan` 用例逐位钉住，真实展开见第九腿（`strategy_params.lookback_days` 10/20、walkforward 两段首尾相接）；③ provenance 端点三 hash 由身份行 + `internal/httpapi` 用例覆盖。⑤-2 中「新旧路径数字完全相同」按 `:245` 登记的**代裁**执行（三值计数与失败窗口显式计数故意不同），**待主任追认**。
 
 > **⚠️ 工单 G7 的两条验收前提被源码证伪（2026-10-23 实测，如实登记，不当已完成）**：
 > 1. **「`pkg/backtest` 里 `job|batch|walkforward` 零命中」不是本仓能产出的判据**：core `pkg/backtest` 实测 **1032 处命中 / 39 个文件**（`job/job.go` 207、`batch/batch.go` 67、`walkforward/walkforward.go` 34、`aliases.go` 39…）。达成它要的是 core 侧 O3（`tellurion:docs/design/qt-decoupling/orchestration-service-design.md` §7「编排层整体移出 `pkg/backtest`」），而 R1 与本仓 `db-schema.md` §5 冻结的路径是「双写 → 对拍 → 切读 → 停写」——旧路径在 O0 切换前**必须继续服务**。本仓能做的是把 durable 侧与 port 做出来，不能单方面让别人的包变空。
