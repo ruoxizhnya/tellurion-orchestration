@@ -140,6 +140,13 @@ type jobView struct {
 	CreatedAt       *time.Time `json:"created_at"`
 	StartedAt       *time.Time `json:"started_at"`
 	CompletedAt     *time.Time `json:"completed_at"`
+
+	// RunSpec 是本 run 的 canonical RunSpec（入队时原样保存的 request_json）。
+	// 加字段 = MINOR。GET 恒返回；list 默认省略、`include_spec=1` 时逐行返回
+	// ——单条 run_spec 上限 1 MiB，100 行列表不设护栏就成了 100 MiB 的响应
+	// 放大面。消费方（core analysis 作业列表）需要「未跑完的 run 也有策略
+	// 元数据」，因为结果面只有跑完之后才有载荷。
+	RunSpec json.RawMessage `json:"run_spec,omitempty"`
 }
 
 type listBody struct {
@@ -198,11 +205,11 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, jobViewOf(job))
+	writeJSON(w, http.StatusOK, jobViewOf(job, true))
 }
 
-func jobViewOf(job *queue.RunRecord) jobView {
-	return jobView{
+func jobViewOf(job *queue.RunRecord, includeSpec bool) jobView {
+	view := jobView{
 		JobID:           job.ID,
 		Status:          string(job.Status),
 		ResultStatus:    resultStatusPtr(job.ResultStatus),
@@ -214,6 +221,10 @@ func jobViewOf(job *queue.RunRecord) jobView {
 		StartedAt:       timePtr(job.StartedAt),
 		CompletedAt:     timePtr(job.CompletedAt),
 	}
+	if includeSpec {
+		view.RunSpec = job.RequestJSON
+	}
+	return view
 }
 
 // cancel 见 §9.4：`running` → 202 `cancelling`（worker 走 AckCancel 确认）；
@@ -260,8 +271,9 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	views := make([]jobView, 0, len(jobs))
+	includeSpec := r.URL.Query().Get("include_spec") == "1"
 	for _, j := range jobs {
-		views = append(views, jobViewOf(j))
+		views = append(views, jobViewOf(j, includeSpec))
 	}
 	writeJSON(w, http.StatusOK, listBody{Jobs: views, Total: len(views)})
 }

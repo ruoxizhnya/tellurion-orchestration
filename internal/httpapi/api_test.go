@@ -104,6 +104,11 @@ func TestSubmit_202PendingWithNullResultStatus(t *testing.T) {
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(jv.RunSpecHash) {
 		t.Fatalf("run_spec_hash = %q, want 64 hex", jv.RunSpecHash)
 	}
+	// SVC-ORCH-G3 收尾腿：GET 恒返回 canonical run_spec（作业列表的策略元数据
+	// 来源），且与入队时的 request 同字节。
+	if string(jv.RunSpec) != `{"kernel":"default","symbol":"600000.SH"}` {
+		t.Fatalf("run_spec = %s, want canonical spec", jv.RunSpec)
+	}
 }
 
 func TestSubmit_IdempotentReplayIsKeyOrderIndependent(t *testing.T) {
@@ -304,6 +309,17 @@ func TestList_FiltersLimitAndFailClosed(t *testing.T) {
 	// jobs 必须是 [] 而不是 null（空列表 JSON 稳定）。
 	if lb.Jobs == nil {
 		t.Fatal("jobs must serialize as [], not null")
+	}
+	// list 默认不返回 run_spec（1 MiB × 100 的响应放大面）。
+	if len(lb.Jobs[0].RunSpec) != 0 {
+		t.Fatalf("list must omit run_spec by default, got %s", lb.Jobs[0].RunSpec)
+	}
+	code, resp = do(t, s, "GET", "/api/runs/jobs?include_spec=1", "")
+	if err := json.Unmarshal([]byte(resp), &lb); err != nil {
+		t.Fatalf("list body: %v", err)
+	}
+	if code != 200 || len(lb.Jobs) == 0 || len(lb.Jobs[0].RunSpec) == 0 {
+		t.Fatalf("include_spec=1 must return run_spec: status %d body %s", code, resp)
 	}
 
 	code, resp = do(t, s, "GET", "/api/runs/jobs?limit=2", "")

@@ -90,6 +90,8 @@ verified-by: SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析�
 > **施工记录（2026-11-09，第四腿：core 异步入口切任务面 + 读面三源）**：core `cmd/analysis/orchestration_jobs.go` 新增 `orchestrationJobStore`——读面按「存量 `backtest_jobs` → 结果面 `run.backtest_results` → 本仓 `GET /api/runs/jobs/{id}`」解析，列表按 id 去重、`created_at` 降序，本仓不可用时降级只返本地行（不把整页打成 500）。`POST /api/backtest` 的异步分支在配置 `ORCHESTRATION_URL` 时把 `CreateJobRequest` 翻成 `run_spec` 调本仓 `POST /api/runs/jobs`，返回 202 `{job_id,status}`；run_spec 只翻本地执行路径消费的字段（strategy / stock_pool / 区间 / initial_capital / kernel / engine_params），不翻手续费/滑点/策略参数，保证新旧路径结果一致。本仓 wire 契约未改。**仍未做**：删 core 本地队列写路径、旧表 drop、UI/openapi 列表页对纯编排作业补策略元数据 —— 本单保持 🔶。
 >
 > **施工记录（2026-11-09，第六腿：core 同步回测切结果面）**：core `pkg/backtest/job` 增 `WithResultFace`，`SaveSyncResult` 注入后只写 `run.backtest_results`、不再插 `backtest_jobs`；`pkg/storage` 补 `ListBacktestResults`，core 读面因此能列出「只有结果行、没有任务行」的作业（同步回测与迁移存量）。本仓无码改动（任务面仍只由本仓写）。**仍未做**：删 core `pkg/backtest/job`/`batch` 本地队列、drop 旧表 —— 本单保持 🔶。
+>
+> **施工记录（2026-11-09，第七腿：core 本地队列退役 + 本仓 `run_spec` 读面补字段）**：core 侧 `pkg/storage/backtest_jobs.go` 整删、`pkg/backtest/job` 收为只读 + 结果面写口、Migration 065 `DROP TABLE IF EXISTS backtest_jobs`，异步 POST 未配 `ORCHESTRATION_URL` 即 503——任务面从此只有一个真相（本仓 `run.backtest_jobs`）。本仓侧为「列表页对纯编排作业补策略元数据」补了 `jobView.run_spec`（**MINOR**：加字段）：`GET /api/runs/jobs/{id}` 恒返回 `run_spec`；`GET /api/runs/jobs` 默认省略、`?include_spec=1` 时逐行返回，避免 1 MiB × 100 的响应放大。core 的 `List` 客户端据此多一个 `includeSpec` 实参（默认 false）。本仓单测/构建/vet 全绿，`docs/api-schema.md` §9.4 已同步。**仍未做**：本单 ⑤ 的「core `pkg/backtest` 对本仓引用符合契约」要等 core 后续单删掉 storage 直连；本单保持 🔶。
 
 ### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] 🔶
 

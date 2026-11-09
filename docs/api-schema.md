@@ -138,6 +138,7 @@ verified-by: SVC-ORCH-G1 契约收编 + 全量 R5（claim / provenance / 父作�
 - **`result` 写完后服务端立即重算父汇总**：`status=completed` 要求 `result_status ∈ {completed, invalid}` 且 `result_uri` 非空；`failed` 要求 `error` 非空。父汇总写不进去 → 500 `parent_summary_failed`（子 run 状态已写成功，重放同一上报即可，终态 + 同载荷是幂等的）。
 - **取消**：`cancel_requested` 可经 `GET /jobs/{id}` 或 claim 响应读到；worker 中止后调 `cancel-ack`（owner 才能确认），服务端随后把该子 run 计入父汇总（`cancelled` 按 failed 计——它是终态但不是 K9 结论，不映射会让父记录永远停在 running）。
 - `GET /api/runs/workers` 的 `kernels` 恒为数组（未声明 = `[]`）；`GET /api/runs/jobs/{id}` 新增 `cancel_requested`（加字段 = MINOR）。
+- **`run_spec`（2026-11-09，SVC-ORCH-G3 收尾腿，加字段 = MINOR）**：`GET /api/runs/jobs/{id}` 恒返回该 run 的 canonical `run_spec`（= 入队时保存的 `request_json`，不是从 hash 反推）。`GET /api/runs/jobs`（列表）**默认省略**、`?include_spec=1` 时逐行返回 —— 单条 spec 上限 `MaxBodyBytes`（1 MiB），100 行列表不设护栏就是 100 MiB 的响应放大面。消费方是 core analysis 的作业列表：pending / running 的 run 只有任务面有策略元数据，结果面要跑完才有载荷。
 
 ### 结果坐标（X0）
 
