@@ -86,6 +86,10 @@ verified-by: SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析�
 > **施工记录（2026-11-09，第三腿：core worker 结果面 sink）**：core `internal/orchestrationworker` 新增 `ResultStoreSink`（写 core 的 `run.backtest_results`，只接受 completed / invalid）与 `MultiSink`；`tellurion:cmd/worker` 装配先过渡期双写（结果面新腿 + legacy `backtest_jobs` 腿），随后在第五腿收为只写结果面。单测 3 条 + 真库 1 条 PASS。本仓仍无码改动（结果内容不进本仓）。**仍未做**：切读、存量迁移、删 core 本地队列 —— 本单保持 🔶。
 >
 > **施工记录（2026-11-09，第五腿：core 存量回填 + 停写 legacy）**：core Migration 064 把 `backtest_jobs` 终态行回填 `run.backtest_results`（pending/running 不搬、ON CONFLICT DO NOTHING、重放幂等）；`tellurion:cmd/worker` 只保留 `ResultStoreSink`，`JobStoreSink` 已删。真库用例 PASS。**仍未做**：core 同步回测仍写 `backtest_jobs`、`pkg/backtest/job`/`batch` 本地队列未删、旧表未 drop —— 本单保持 🔶。
+>
+> **施工记录（2026-11-09，第四腿：core 异步入口切任务面 + 读面三源）**：core `cmd/analysis/orchestration_jobs.go` 新增 `orchestrationJobStore`——读面按「存量 `backtest_jobs` → 结果面 `run.backtest_results` → 本仓 `GET /api/runs/jobs/{id}`」解析，列表按 id 去重、`created_at` 降序，本仓不可用时降级只返本地行（不把整页打成 500）。`POST /api/backtest` 的异步分支在配置 `ORCHESTRATION_URL` 时把 `CreateJobRequest` 翻成 `run_spec` 调本仓 `POST /api/runs/jobs`，返回 202 `{job_id,status}`；run_spec 只翻本地执行路径消费的字段（strategy / stock_pool / 区间 / initial_capital / kernel / engine_params），不翻手续费/滑点/策略参数，保证新旧路径结果一致。本仓 wire 契约未改。**仍未做**：删 core 本地队列写路径、旧表 drop、UI/openapi 列表页对纯编排作业补策略元数据 —— 本单保持 🔶。
+>
+> **施工记录（2026-11-09，第六腿：core 同步回测切结果面）**：core `pkg/backtest/job` 增 `WithResultFace`，`SaveSyncResult` 注入后只写 `run.backtest_results`、不再插 `backtest_jobs`；`pkg/storage` 补 `ListBacktestResults`，core 读面因此能列出「只有结果行、没有任务行」的作业（同步回测与迁移存量）。本仓无码改动（任务面仍只由本仓写）。**仍未做**：删 core `pkg/backtest/job`/`batch` 本地队列、drop 旧表 —— 本单保持 🔶。
 
 ### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] 🔶
 
