@@ -78,6 +78,8 @@ verified-by: SVC-ORCH-G1 ✅（2026-11-09：`contracts v0.9.0` 远端可解析�
 > ⚠️ **本行三处已于同日实测订正（2026-10-26 账实核对）**：① `SVC-CORE-RUN-RETIRE` **已立单**——`tellurion:docs/TASKS.md:121`「六之二」，串行第 5，所以它不再是本单的阻塞前置；② **「子 run 入队」已落**——`internal/parents/service.go:143` 的 `enqueueChildren` 是 `run.backtest_jobs.parent_job_id` 的唯一写入方（`:148` 填 `ParentJobID`），本文件 G3 ① 自己也记了 ✅（2026-10-25），把它列进「未落」是自相矛盾；③ 真正未落的三条**复核后仍成立**：`internal/httpapi/` 下**没有** `auth.go` / `policy.go`（R5 鉴权未接）、**没有** `POST …/artifacts` 路由（只有 `GET …/provenance` 读面），worker 进程在 core（`tellurion:cmd/worker`）而非本仓。⇒ 本单的剩余前置是 **contracts 编排形状（`CT-04`）+ R5 + artifact 写端点**，不是「等退役单」。
 >
 > **前置解除（2026-11-09，实测）**：三条剩余前置已全部满足——① `CT-04` 结案且 `contracts v0.9.0` 远端可解析（见 `SVC-ORCH-G1`）；② 全量 R5 已落（同上，16 条路由 service 角色）；③ `POST /api/runs/jobs/{id}/artifacts` 已在 `SVC-ORCH-G2` 落地。⇒ 本单从 ⛔ 转 🔶，可以开工；施工顺序仍是「core analysis 异步入口改调本仓 → core 裸表零新增 → 存量迁移 → 删 core 本地队列写路径 → UI/openapi 同步」。
+>
+> **施工记录（2026-11-09，第一腿：core 任务面客户端）**：`tellurion:internal/orchestrationworker/client.go` 新增 `Submit` / `List` / `Cancel`（路径与状态码按本仓 `docs/api-schema.md` §9.4），真 orchestration 进程 + 真 PG 的 wire 用例 `TestWireControlPlaneWithRealOrchestrationProcess` **PASS**（提交 202 → 同键重放 200 → 列表 → 取消 → 复读；1.48s）。本仓 wire 契约未改，无需动码。**仍未做**：core `cmd/analysis` 异步入口改调、结果面 `run.backtest_results`、存量迁移、删 core 本地队列 —— 本单保持 🔶。
 
 ### QT-44 · X5 编排 / worker 服务（job/batch/walkforward 上移）[P2] 🔶
 
