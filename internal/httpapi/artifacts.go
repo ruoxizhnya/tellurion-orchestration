@@ -7,7 +7,8 @@ package httpapi
 // 的幂等与身份漂移语义，不在 HTTP 层重造「先查再写」。
 //
 // 请求体形状 = 本地 DTO `queue.ArtifactRecord`（docs/api-schema.md 标注为本地
-// 形状；契约化归 SVC-ORCH-G1 ⛔ / tellurion-contracts:CT-04）。路径里的 id
+// 形状；契约化已由 tellurion-contracts:CT-04 收编，contracts/run v0.9.0 起可用，
+// 跨仓冻结仍以 contracts 发布为准）。路径里的 id
 // 是 run_id 的唯一来源：body 里的 `run_id` 若出现且不一致 → 400，不静默覆盖。
 
 import (

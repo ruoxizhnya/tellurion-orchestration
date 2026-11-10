@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-10-25
-verified-by: 施工 ⑪（X5c worker 打活面 + 父汇总真实写回：子 run 上报终态即重算 `parent_jobs`；`cancelled` 按 failed 计入）
+last-verified: 2026-11-11
+verified-by: 代码-文档对齐审计（2026-11-11：`run_artifacts` 生产者已接线、三 hash 端到端成立；advisory lock / SKIP LOCKED / 三值汇总按代码复核）；施工 ⑪（X5c worker 打活面 + 父汇总真实写回：子 run 上报终态即重算 `parent_jobs`；`cancelled` 按 failed 计入）
 ---
 
 # Dataflow — tellurion-orchestration
@@ -39,7 +39,7 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 1. `POST /api/runs/jobs` → 校验 `idempotency_key` + RunSpec（market→kernel 在**入队前**解析）→ 算 `request_hash` → 写 `run.backtest_jobs(status=pending)` → 返回 `job_id`。同键同 hash = 原 job（200），同键不同 hash = 409。
 2. worker 注册后领取：`POST /api/runs/workers`（幂等，`kernels: []` 归一成 NULL）→ `POST /api/runs/workers/{id}/claim` 原子 `pending → running` + `worker_id` + `lease_until`（PG 实现用 `FOR UPDATE SKIP LOCKED`，领取顺序 `priority DESC → created_at ASC → id ASC`，与内存实现的 tie-break 同形；施工 ③ 已落）；**worker 只执行响应里带回的 `run_spec`**，不从扁平列重建请求。无活 → 200 `{"job":null}`；未注册 → 404 `worker_not_found`；`draining` / `offline` → 409 `worker_draining`。
    - **内核匹配（施工 ④ 落接口，施工 ⑪ 有生产消费方）**：`Claim` 仍不按内核过滤（§9.2 冻结面，加了就是 MAJOR）；过滤走**可选**接口 `KernelAwareJobQueue.ClaimByKernel`——它读 worker **在注册表里声明的** `kernels`，只领生效内核匹配的行；未注册、注册表未装配、或声明为空 ⇒ 不过滤（与「没登记不等于在 drain」同形）。行的生效内核：**只有 JSON 字符串才算内核**，缺键 / null / 数字 / 顶层非对象 / 空串一律按默认 `go`；两侧同口径的钉子是套件里 `ClaimByKernelReadsOnlyStringKernels`。**声明了 kernels 但队列不支持过滤 ⇒ 503 `kernel_filter_unavailable`**（不静默退回不过滤）。消费方是 core 的 `cmd/worker`（本仓零 import core，见 `tellurion:cmd/worker`）。
-3. 执行期心跳续租：worker 每 `-heartbeat` 调 `POST /api/runs/workers/{id}/heartbeat`（存活证明）+ `POST /api/runs/jobs/{id}/lease`（续租），并顺带读 `GET /api/runs/jobs/{id}` 的 `cancel_requested`。租约丢失 → 409 `lease_lost`，worker 立即停止、**不写结果**。引擎在**日循环之前**写输入身份（interim：core `quant.run_provenance`；O1：`run.run_artifacts`）。**读面已落（施工 ⑨）**：`run_artifacts` 的写入端口 `queue.ArtifactStore.SaveArtifact`（内存 + PG 两个实现）与 `/provenance` 读路径就位；**`run_artifacts` 的写入方仍未落**——裁-19 把它定义为 worker 写的投影，但 worker 侧尚未接 artifact 上报，今天 `SaveArtifact` 只被测试与编译期断言消费。
+3. 执行期心跳续租：worker 每 `-heartbeat` 调 `POST /api/runs/workers/{id}/heartbeat`（存活证明）+ `POST /api/runs/jobs/{id}/lease`（续租），并顺带读 `GET /api/runs/jobs/{id}` 的 `cancel_requested`。租约丢失 → 409 `lease_lost`，worker 立即停止、**不写结果**。引擎在**日循环之前**写输入身份（interim：core `quant.run_provenance`；O1：`run.run_artifacts`）。**读写面均已落**：`run_artifacts` 的写入端口 `queue.ArtifactStore.SaveArtifact`（内存 + PG 两个实现）与 `/provenance` 读路径就位（施工 ⑨），写入方是 `POST /api/runs/jobs/{id}/artifacts`（`SVC-ORCH-G2`）；worker 侧 2026-11-10 以真 run 写入三 hash（`QT-44` 取证）。
 4. 终态写一次：`POST /api/runs/jobs/{id}/result`（`status=completed` + `result_status ∈ {completed, invalid}` + 非空 `result_uri`，或 `status=failed` + `error`）。`result_status` 是 K9 三值，和队列 `status` 是**两轴**（`ARCHITECTURE.md` §9.1 F8）；终态的每一行必须符合 §9.5 的**两轴映射表**（`invalid` → `status=completed` + `result_status=invalid`，`error` 为空；failed 时按是否产出 ResultSpec 传 `failed` 或空串）。
 5. `GET /api/runs/jobs/{id}` 查生命周期 + 结果结论；`GET /api/runs/{id}/provenance`（**施工 ⑨ 已落**）是 `run_artifacts ⋈ backtest_jobs`，`result_status` **只从 `backtest_jobs` 取**——`run_artifacts` 无 status 列，不存在第二个判据。响应是独立 DTO（15 字段），不扩 `BacktestResponse`。三态错误：非终态 → 409 `provenance_not_ready`；终态 `failed` / `cancelled` 无行 → 404 `provenance_not_found`；`completed` / `invalid` 无行 → 500 `provenance_missing`（数据完整性破坏，不是 normal path）。
    - 路由口径：`GET /api/runs/{id}/provenance` 与 `GET /api/runs/parents/{id}` 在 Go 1.22 ServeMux 里**互不更具体**，注册期 panic。落地方式是 catch-all `GET /api/runs/{rest...}` 后手工切 `/provenance` 后缀；jobs / parents 两条更具体的路由仍优先（钉子 `TestProvenance_CatchAllDoesNotStealOtherRoutes`）。
@@ -86,7 +86,7 @@ tellurion-orchestration ── 写 run.*（队列 / 批次 / 报告 / 三 hash /
 
 1. 每个 job 有且仅有一个终态（`completed` / `failed` / `cancelled`）；进入终态后不可再迁移。
 2. 幂等键相同 + `request_hash` 相同 → 同一个 `job_id`；同键不同 hash → 409，绝不复用。
-3. 任何 `result_status` 为 `completed` / `invalid` 的 job（队列 `status=completed`）都能通过 `/provenance` 取到三 hash；`failed` / `cancelled` 允许无 provenance（`failed` 若已跑过则可有）。**施工 ⑨ 已落读面**（端点 + 三态错误钉住）；**生产者未落**——`run_artifacts` 的写入方仍是 core 引擎（O1 双写/切读），所以这条不变量的端到端成立要等生产者接线。
+3. 任何 `result_status` 为 `completed` / `invalid` 的 job（队列 `status=completed`）都能通过 `/provenance` 取到三 hash；`failed` / `cancelled` 允许无 provenance（`failed` 若已跑过则可有）。**读写面均已落**（端点 + 三态错误钉住；`SVC-ORCH-G2`）；生产者已接线——worker 经 `POST /api/runs/jobs/{id}/artifacts` 写入三 hash，2026-11-10 真 run 取证（`QT-44`），不变量端到端成立。
 4. `drain` 后该 worker 不再接新任务；在途任务跑完（或租约到期被回收）才 `offline`。`offline` 同样不接新任务；未请求过 drain 的 `offline` 可被存活证明（心跳 / 重注册）恢复 `active`，请求过 drain 的不行。
 5. `result_status` 只允许 K9 三值；**不存在第四值**；`invalid` 的 `error` 为空、`invalid_reasons` 在结果里。
 6. 同一 job 的 `running` 租约在任一时刻只有一个有效 owner；过期 owner 的写入被拒。

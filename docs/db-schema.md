@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-11-07
-verified-by: SVC-ORCH-G2（`run.*` 唯一 writer 守卫 + artifact 写端点落地 + 六表「写者 / 读者 / 保留」登记 + 迁移重放用例）；2026-10-25 施工 ⑨（`queue.ArtifactStore` 的 `ON CONFLICT … WHERE <13 项身份全等>`）
+last-verified: 2026-11-11
+verified-by: 代码-文档对齐审计（2026-11-11：六表 DDL 与 `internal/queue` 逐表复核；worker 执行已落，删除「未落」）；SVC-ORCH-G2（`run.*` 唯一 writer 守卫 + artifact 写端点落地 + 六表「写者 / 读者 / 保留」登记 + 迁移重放用例）；2026-10-25 施工 ⑨（`queue.ArtifactStore` 的 `ON CONFLICT … WHERE <13 项身份全等>`）
 ---
 
 # DB Schema — tellurion-orchestration
@@ -100,7 +100,7 @@ verified-by: SVC-ORCH-G2（`run.*` 唯一 writer 守卫 + artifact 写端点落�
 | `run.batch_runs` / `run.walk_forward_reports` | 旧键不变 | **迁移期旧表**：由 `parent_jobs` 取代，停写；O1 对拍后删除 |
 | `run.worker_registry` | `worker_id` | 能力（`kernels`，施工 ④ 起由可选接口 `KernelAwareJobQueue.ClaimByKernel` 消费；空数组 = 不过滤，不是「什么都不能干」）/ 心跳 / active → draining → offline（施工 ⑤：`last_heartbeat_at <= now-timeout` 由 `ReapOffline` 推 offline，含 draining；未请求 drain 的可用心跳 / 重注册恢复 active）；超时不删行 |
 
-**施工 ⑦（X5b，裁-13 落地）**：新增 `run.parent_jobs` 与 `backtest_jobs.parent_job_id`（列 + 索引），`internal/pgstore.Parents` 与 `internal/queue.MemoryParents` 跑同一套语义；提交写父表、汇总写回三值计数都由 `internal/parents` 完成（复用 `internal/plan`）。**施工 ⑧**：追加 `parent_jobs_plan_hash_uidx`（`plan_hash` 唯一）——计划身份跨幂等键去重；`POST/GET /api/runs/parents` 已落，`GET` 的 `children` 由 `ParentChildLister`（内存 + PG 两个 `JobQueue` 实现）按 `parent_job_id` 读取。**施工 ⑩**：子 run 入队落 `internal/parents`——父行落库后逐条 `Enqueue` 并写 `parent_job_id`（唯一写入方），幂等键 `parent:<parent_job_id>:<child_index>`；DDL 无改动。**未落**：worker 执行。
+**施工 ⑦（X5b，裁-13 落地）**：新增 `run.parent_jobs` 与 `backtest_jobs.parent_job_id`（列 + 索引），`internal/pgstore.Parents` 与 `internal/queue.MemoryParents` 跑同一套语义；提交写父表、汇总写回三值计数都由 `internal/parents` 完成（复用 `internal/plan`）。**施工 ⑧**：追加 `parent_jobs_plan_hash_uidx`（`plan_hash` 唯一）——计划身份跨幂等键去重；`POST/GET /api/runs/parents` 已落，`GET` 的 `children` 由 `ParentChildLister`（内存 + PG 两个 `JobQueue` 实现）按 `parent_job_id` 读取。**施工 ⑩**：子 run 入队落 `internal/parents`——父行落库后逐条 `Enqueue` 并写 `parent_job_id`（唯一写入方），幂等键 `parent:<parent_job_id>:<child_index>`；DDL 无改动。**已落**：worker 执行由 core 的 `cmd/worker` 经这组端点完成（`SVC-ORCH-G3`，2026-11-10 真引擎 + 真行情取证）。
 
 **迁移路径**（与 QT-63 ③-① 一致）：`batch_runs` / `walk_forward_reports` → `parent_jobs` 双写 → 对拍 → 切读 → 停写（本轮已直接停在「只写新表」：两张旧表自始无写入路径，不存在存量行）；`quant.run_provenance` 由 `run.run_artifacts` 双写/对拍/切读/停写后取代。**子 run 关系已定**：`backtest_jobs.parent_job_id`（R6 裁-13），不再是待裁项。
 

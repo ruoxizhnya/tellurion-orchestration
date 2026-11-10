@@ -1,15 +1,16 @@
 // Command orchestrationservice 是编排服务的进程装配（X5 的第一个可运行件）。
 //
-// 今天它做的三件事：连库（DSN 空即拒绝启动）→ 启动迁移（queue.Migrations() 按序
-// 幂等执行）→ 提供 jobs 4 端点的 HTTP 面 + 周期回收（租约过期 + 心跳超时）。
+// 今天它做的四件事：连库（DSN 空即拒绝启动）→ 启动迁移（queue.Migrations() 按序
+// 幂等执行）→ 全量 HTTP 面（jobs 4 + parents 2 + provenance + artifacts + workers 8
+// = 16 条 `/api/*`，加 `/healthz` / `/readyz`）→ 周期回收（租约过期 + 心跳超时）。
 //
 // 它**不做**的（都在 docs/ARCHITECTURE.md §9.8 如实登记）：
 //   - 不执行 run：领取后的内核装配属 core / NT 两侧，本仓没有引擎（§5 边界）；
-//   - 不做 worker 进程本身：派活契约未定，心跳超时回收走可选接口
-//     queue.WorkerReaper（§9.7 R10），不依赖 worker 进程存在。
+//   - 不做 worker 进程本身：worker 在 core（`tellurion:cmd/worker`），本仓只提供
+//     派活 / 打活 HTTP 面；心跳超时回收走可选接口 queue.WorkerReaper（§9.7 R10）。
 //
-// 鉴权（R5 最小面，SVC-ORCH-G2 ④）：只拦 artifact 写端点（service 角色），
-// 其余端点仍无鉴权——全量 R5 归 SVC-ORCH-G1（⛔ 待契约形状）。
+// 鉴权（全量 R5，SVC-ORCH-G1，2026-11-09）：`/api/*` 16 条路由全部 service 角色；
+// `/healthz` / `/readyz` 公开。R5 最小面先由 SVC-ORCH-G2 ④ 覆盖 artifact 写端点。
 package main
 
 import (

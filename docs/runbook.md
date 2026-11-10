@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-11-07
-verified-by: SVC-ORCH-G4（失败语义五类 + `/readyz` + 回收参数口径 + 运维可见性 + 两条内存级演练 + 2026-11-07 真库腿：`/readyz` 503→200、租约回收、§6 SQL）
+last-verified: 2026-11-11
+verified-by: 代码-文档对齐审计（2026-11-11：回收参数默认值 `-worker-lease 60s` / `-reap-interval 90s` / `-offline-after 30s` 与代码复核；失败语义五类未变）；SVC-ORCH-G4（失败语义五类 + `/readyz` + 回收参数口径 + 运维可见性 + 两条内存级演练 + 2026-11-07 真库腿：`/readyz` 503→200、租约回收、§6 SQL）
 ---
 
 # Runbook — tellurion-orchestration

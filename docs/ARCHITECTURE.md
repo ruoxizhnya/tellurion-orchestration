@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-11-09
-verified-by: SVC-ORCH-G1 契约收编（§9.3 增 `ClaimView` / `ParentSubmitRequest` 行，`ProvenanceResponse` 契约位改 `contracts/run`）；2026-10-25 施工 ⑪
+last-verified: 2026-11-11
+verified-by: 代码-文档对齐审计（2026-11-11：X5b/X0/R5 状态由「未落」翻 ✅，引 SVC-ORCH-G1/G2/G3 与 QT-44 取证）；SVC-ORCH-G1 契约收编（§9.3 增 `ClaimView` / `ParentSubmitRequest` 行，`ProvenanceResponse` 契约位改 `contracts/run`）；2026-10-25 施工 ⑪
 ---
 
 # 架构 — tellurion-orchestration
@@ -70,9 +70,9 @@ tellurion-orchestration ──► core 引擎（派活）
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | X5a | job 队列 + 状态机 + 幂等 | ✅ 内存 + PG 两个实现 + jobs 4 端点（施工 ②③④）；R8/R9 已落，见 §9.8 |
-| X5b | batch + walkforward | 🔶 规划与汇总纯函数已落（施工 ⑥）；**父表 `parent_jobs` + `backtest_jobs.parent_job_id` 已落（施工 ⑦，裁-13）**，提交写父表 + 汇总写回已接 `internal/parents`；**父作业 HTTP 2 端点已落（施工 ⑧）**；**子 run 入队已落（施工 ⑩，`parent_job_id` 的唯一写入方）**；worker 执行未落 |
+| X5b | batch + walkforward | ✅ 规划与汇总纯函数已落（施工 ⑥）；**父表 `parent_jobs` + `backtest_jobs.parent_job_id` 已落（施工 ⑦，裁-13）**，提交写父表 + 汇总写回已接 `internal/parents`；**父作业 HTTP 2 端点已落（施工 ⑧）**；**子 run 入队已落（施工 ⑩，`parent_job_id` 的唯一写入方）**；worker 执行已落（`SVC-ORCH-G3`，2026-11-10 真引擎 + 真行情取证） |
 | X5c | worker 注册 / 心跳 / drain / 心跳超时 | ✅ 端到端（2026-10-25，施工 ⑪）：port + 内存 / PG 两个实现 + 心跳超时回收（施工 ⑤）+ **worker 打活 HTTP 面**（注册 / 心跳 / 领取 / 续租 / 上报 / 取消确认 / drain）。**worker 进程在 core**（`tellurion:cmd/worker`）——本仓零 import core，只提供派活面 |
-| X0 | 三 hash 留痕（`run_artifacts`） | 🔶 端口 + 内存 / PG 两个实现 + `GET /api/runs/{id}/provenance` 已落（施工 ⑨）；父 GET 的 `children[]` 带三 hash。**生产者仍未落**：worker 进程已在 core（施工 ⑪），但它尚未把 core 的三 hash 写入 `run_artifacts`——本仓没有对应写入端点（见 TASKS 施工 ⑪「未落」） |
+| X0 | 三 hash 留痕（`run_artifacts`） | ✅ 端口 + 内存 / PG 两个实现 + `GET /api/runs/{id}/provenance` 已落（施工 ⑨）；父 GET 的 `children[]` 带三 hash；写入端点是 `POST /api/runs/jobs/{id}/artifacts`（`SVC-ORCH-G2`），core worker 2026-11-10 以真 run 写入三 hash（`QT-44`） |
 
 ## 9. 接口对表（M8 前置 · ✅ 2026-10-22）
 
@@ -295,7 +295,7 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | R2 | **结果本体指针指向哪** | 今天 `backtest_jobs.result JSONB` 存内容；本仓边界禁止存内容；artifact store 归属未定（strategy 仓？core state store？） | 由 core 的 state store / strategy artifact 服务提供内容读取面，本仓只存 `result_uri`；O1 切读时一并落 |
 | R3 | **per-run seed / 策略参数** | `BacktestRequest` 没有 `Seed` 与 `StrategyParams`；seed 是进程级 `Config.Seed`（`pkg/backtest/engine.go:35`），params 只有默认值（`pkg/backtest/provenance.go:226`） | interim：编排配置固定 worker seed、同部署同值，`run_spec_hash` 记生效 seed；per-run 覆写要改冻结的 RunSpec（QT-21 / SPEC 评审），不在 QT-44 擅改 |
 | R4 | **`JobQueue` port 的归属与版本** | contracts 今天 `JobQueue` 零命中；本仓是 S0 占位；core 需要 adapter | S1 迁 contracts（core adapter + 本仓实现 = 两个使用方，满足 ADR-0001 ①）；先在本仓落同名接口，contracts 发布后切 import。`RunStateStore` **不新增**（H5 作废） |
-| R5 | **鉴权与 worker 身份** | C 组全部端点未实现；worker_id 可伪造；`/api/runs/*` 与 QT-50 ④ 的鉴权矩阵未合流 | 与 QT-50 ④ 同一套 `unauthenticated` / `forbidden`；worker 注册必须带凭证（不能只报一个 id）；`drain` 只能由运维角色调用 |
+| R5 | **鉴权与 worker 身份** | ✅ **已落 2026-11-09（`SVC-ORCH-G1`）**：`/api/*` 16 条路由全部 service 角色，worker 注册 / drain 由凭证角色约束；原冲突（C 组端点未实现 / worker_id 可伪造 / 与 QT-50 ④ 未合流）已消除 | 与 QT-50 ④ 同一套 `unauthenticated` / `forbidden`；worker 注册必须带凭证（不能只报一个 id）；`drain` 只能由运维角色调用 |
 | R6 | **batch / walkforward 的子 run 关系** | ✅ **已裁 2026-10-25（裁-13）**：建**一张** `run.parent_jobs`（`kind` + `plan_canonical`/`plan_hash` + 三值汇总），子 run 用 `run.backtest_jobs.parent_job_id` 列 + 索引表达；**不**塞 `request_json`（`request_canonical` 锚点已证明 JSONB 不能当身份），**不**建两张实体表（两种父共用一套生命周期，`internal/plansuite` 已钉「不各写一套」）。`batch_runs` / `walk_forward_reports` 降为迁移期旧表、停写。落地见 §9.8 施工 ⑦ |
 | R7 | **队列深度与 `queue_full` 阈值** | 今天无上限（每 job 一个 goroutine）；429 语义在新端点冻结，但阈值是部署配置 | 契约只冻结「达上限 → 429 + `queue_full`」；默认值由部署配置给出（建议 `max_pending = worker 数 × 4`，压测后定），不进契约 |
 | R8 | **`cancelling` 行的租约回收出口**（2026-10-23 施工 ① 新登记；**已裁 2026-10-23 = 选 (a)**；**已落 施工 ④，两个实现同批**） | §9.5 的 `ReapExpired` 只定义了 `running` 的回收：`cancelling` 行的 owner 若崩溃，`AckCancel` 因租约过期拒绝、`ReapExpired` 又不处理它——该行会永久停在中间态 | ✅ 落地形状：`ReapExpired` 的第二类迁移「`cancelling` 且租约过期 → `cancelled`」，**不**计 attempts（它不是重试，是给已作废的结果收尾）。内存侧在 `Memory.ReapExpired` 的分支里；PG 侧是 `reapCancellingSQL` 这条**独立语句**（`reapSQL` 保持原样：两条判据不同形就不合并成一条带 CASE 的 UPDATE）。钉子：`qtest.ReapLandsOrphanedCancellingRow`（两侧同跑），破坏腿见 `docs/TASKS.md` 施工 ④ |
@@ -393,9 +393,9 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | 按内核能力（`Kernels`）过滤领取 | ✅ 内存 + PG（施工 ④，R9 裁决落地）——可选接口 `KernelAwareJobQueue.ClaimByKernel`；抽取规则两侧同口径由 `ClaimByKernelReadsOnlyStringKernels` 钉住。**消费方 = worker 领取端点**（施工 ⑪）：声明非空走 `ClaimByKernel`，队列不支持就 503，绝不静默不过滤 |
 | `cancelling` 行的租约回收出口 | ✅ 内存 + PG（施工 ④，R8 裁决落地）——租约过期的 `cancelling` 行落 `cancelled`，不计 attempts；`cmd` 的周期回收同批带上 |
 | 入队前「内核 / 市场可解析」校验（§9.4 fail-closed ①） | ⬜ 未实现（依赖 `EngineRegistry` / `MarketRouter`，本仓不引） |
-| batch / walkforward 的**规划与汇总**（网格展开 / 窗口切分 / 三值计数 / 排名 / 父状态） | ✅ 纯函数已落 `internal/plan`（施工 ⑥，X5b），共享套件同跑两种父；**未落**：`batch_runs` / `walk_forward_reports` 写入、batch/walkforward 4 端点、worker 领取执行 |
-| `run_artifacts` 写入 / 读（X0） | 🔶 内存 + PG 两个实现（施工 ⑨）——可选接口 `ArtifactStore`，`cmd` 用 `store.Artifacts()` 装配 `WithArtifacts`；同身份幂等 / 漂移 `ErrArtifactConflict` / 未知 run 拒写由两侧同口径钉住；`GET /api/runs/{id}/provenance` 与父 GET 的 `children[]` 三 hash 已落。**未落**：生产者（worker 进程）——本仓没有引擎 |
-| worker 端点 / 鉴权（R5） | ⬜ 未实现；jobs 4 端点 + 父作业 2 端点 + provenance 已落（见上表） |
+| batch / walkforward 的**规划与汇总**（网格展开 / 窗口切分 / 三值计数 / 排名 / 父状态） | ✅ 纯函数已落 `internal/plan`（施工 ⑥，X5b），共享套件同跑两种父；**已落**：父作业 2 端点 + 子 run 入队（施工 ⑧⑩）、worker 领取执行（`SVC-ORCH-G3`）；`batch_runs` / `walk_forward_reports` 按裁-13 停写（迁移期旧表） |
+| `run_artifacts` 写入 / 读（X0） | 🔶 内存 + PG 两个实现（施工 ⑨）——可选接口 `ArtifactStore`，`cmd` 用 `store.Artifacts()` 装配 `WithArtifacts`；同身份幂等 / 漂移 `ErrArtifactConflict` / 未知 run 拒写由两侧同口径钉住；`GET /api/runs/{id}/provenance` 与父 GET 的 `children[]` 三 hash 已落。**已落**：生产者经 `POST /api/runs/jobs/{id}/artifacts`（`SVC-ORCH-G2`）由 core worker 写入，2026-11-10 真 run 取证（`QT-44`） |
+| worker 端点 / 鉴权（R5） | ✅ 已落：worker 8 端点（施工 ⑪）+ 全量 R5 16 条路由 service 角色（`SVC-ORCH-G1`，2026-11-09）；jobs 4 + 父作业 2 + provenance + artifact 写端点见上表 |
 | worker 心跳超时 → `offline` | ✅ 内存 + PG（施工 ⑤，R10）——可选接口 `WorkerReaper.ReapOffline`；`offline` 的 worker 不再被派活（`Claim` / `ClaimByKernel` 同一个 active 门），存活证明（心跳 / 重注册）可复活未 drain 的 worker。**消费方**：`cmd` 的周期回收；worker 进程在 core（`cmd/worker`，施工 ⑪） |
 
 **故意取舍（施工 ①②③ 累计）**
@@ -421,8 +421,8 @@ Go 侧是 `queue.KernelOf`，PG 侧是 `claimSQL` 里 `jsonb_typeof(request_json
 | 子 run 派生 | walkforward 每窗两条（train / test），只替换 `start_date` / `end_date`；kernel / fill_timing / seed / strategy_params / strategy_ref 原样保留（共享套件逐字段断言） | —（施工 ⑩：入队写 `parent_job_id`，键 = `parent:<parent_job_id>:<child_index>`） |
 | 汇总 | 三值分开计数（`completed` / `invalid` / `failed`）+ `pending`；batch 必须传计划总数且与逐条回报数一致（漏报即拒），walkforward 缺段 / 缺窗算 pending；只对 `completed` 且给出有限 score 的子 run 排名（同分按 `run_id` 升序），`invalid` / `failed` 保留但 `rank=0`；walkforward 单段失败 = 整窗失败；父状态：还有未回报 → `running`，任一 failed → `failed`（**不吞**子失败），否则 `completed` | 结果内容解析 / 指标均值（本仓不碰结果内容；score 由执行侧给） |
 
-**裁-13 落地（施工 ⑦）**：父记录不再等 R6——建 **一张** `run.parent_jobs`，子 run 用 `backtest_jobs.parent_job_id`（列 + 索引）归属父计划；`internal/parents` 的 `SubmitBatch` / `SubmitWalkForward` 提交即写父表，`ApplyBatchSummary` / `ApplyWalkForwardSummary` 复用 `internal/plan` 的汇总写回三值计数。`batch_runs` / `walk_forward_reports` 停写、保留为迁移期旧表。**施工 ⑩ 已补**：提交后逐条入队子 run 并写 `parent_job_id`。**仍未落**：worker 执行。
+**裁-13 落地（施工 ⑦）**：父记录不再等 R6——建 **一张** `run.parent_jobs`，子 run 用 `backtest_jobs.parent_job_id`（列 + 索引）归属父计划；`internal/parents` 的 `SubmitBatch` / `SubmitWalkForward` 提交即写父表，`ApplyBatchSummary` / `ApplyWalkForwardSummary` 复用 `internal/plan` 的汇总写回三值计数。`batch_runs` / `walk_forward_reports` 停写、保留为迁移期旧表。**施工 ⑩ 已补**：提交后逐条入队子 run 并写 `parent_job_id`。**已落**：worker 执行（`SVC-ORCH-G3`，2026-11-10）。
 
-**X0 落地（施工 ⑨）**：`run_artifacts` 的读写门是**可选接口** `ArtifactStore`（§9.6「新接口 = MINOR」，`JobQueue` 的 10 方法一个字没动），内存 + PG 各一个实现，`cmd` 用 `store.Artifacts()` 装配并开 `WithArtifacts`。三条口径写死在两个实现共用处：① 未知 run 拒写（PG 是 FK 23503、内存显式查 `Memory.Get`——同一段代码换实现不能换行为）；② 同身份重写幂等、**不刷 `created_at`**；③ 同 run_id 身份漂移 → `ErrArtifactConflict`，**不覆盖**（三 hash 是坐标，覆盖等于把两次 run 的留痕并成一次）。读面 `GET /api/runs/{id}/provenance` 只做 `run_artifacts ⋈ backtest_jobs`：hash / 指针 / 生效值来自留痕表，**`result_status` 只从 `backtest_jobs` 取**；没有留痕时按两轴分三态（非终态 409 / 终态 failed·cancelled 404 / 终态 completed·invalid 500）。父 GET 的 `children[]` 逐子补三 hash（`run_spec_hash` 来自行的 `request_hash`，另两个来自留痕；未写入就省略，不伪造）。**仍未落**：生产者——写留痕的是 worker 进程，本仓没有引擎（同 `ClaimByKernel` 的处境）；鉴权 R5 仍未裁。
+**X0 落地（施工 ⑨）**：`run_artifacts` 的读写门是**可选接口** `ArtifactStore`（§9.6「新接口 = MINOR」，`JobQueue` 的 10 方法一个字没动），内存 + PG 各一个实现，`cmd` 用 `store.Artifacts()` 装配并开 `WithArtifacts`。三条口径写死在两个实现共用处：① 未知 run 拒写（PG 是 FK 23503、内存显式查 `Memory.Get`——同一段代码换实现不能换行为）；② 同身份重写幂等、**不刷 `created_at`**；③ 同 run_id 身份漂移 → `ErrArtifactConflict`，**不覆盖**（三 hash 是坐标，覆盖等于把两次 run 的留痕并成一次）。读面 `GET /api/runs/{id}/provenance` 只做 `run_artifacts ⋈ backtest_jobs`：hash / 指针 / 生效值来自留痕表，**`result_status` 只从 `backtest_jobs` 取**；没有留痕时按两轴分三态（非终态 409 / 终态 failed·cancelled 404 / 终态 completed·invalid 500）。父 GET 的 `children[]` 逐子补三 hash（`run_spec_hash` 来自行的 `request_hash`，另两个来自留痕；未写入就省略，不伪造）。**已落**：生产者经 `POST /api/runs/jobs/{id}/artifacts`（`SVC-ORCH-G2`）由 core worker 写入，2026-11-10 真 run 取证（`QT-44`）；全量 R5 已落（`SVC-ORCH-G1`，2026-11-09）。
 
-**自检结论**（施工 ⑩ 后）：队列的语义面与 durable 面已落地（内存 + PG 同一套 qtest，45 条/实现）；`internal/plan` 把 X5b 的**规划与汇总**做成了纯函数，`internal/plansuite` 的 8 条共享用例同跑两种父；父记录的身份 / 提交 / 汇总已落 `internal/parents` + 两个 `ParentStore` 实现；**子 run 入队已落（施工 ⑩）——提交一次就写出父记录 + 全部子 run（`parent_job_id`），`GET /parents/{id}` 的 `children[]` 不再是空数组**；X0 的 `run_artifacts` 读写与 `/provenance` 已落两个实现 + HTTP。**仍未完成**：worker 领取执行的装配（本仓没有引擎，故 `ClaimByKernel` 与 `ArtifactStore.SaveArtifact` 目前都没有生产消费方）、worker 端点、鉴权（R5）、以及 `pkg/backtest` 侧的迁移（属 core，见 `docs/TASKS.md` 验收对照）。判据是「队列可运行、父计划可提交 / 可入队 / 可汇总落库、三 hash 可从 HTTP 读出，但还不能自己跑子 run」。
+**自检结论**（施工 ⑩ 后）：队列的语义面与 durable 面已落地（内存 + PG 同一套 qtest，45 条/实现）；`internal/plan` 把 X5b 的**规划与汇总**做成了纯函数，`internal/plansuite` 的 8 条共享用例同跑两种父；父记录的身份 / 提交 / 汇总已落 `internal/parents` + 两个 `ParentStore` 实现；**子 run 入队已落（施工 ⑩）——提交一次就写出父记录 + 全部子 run（`parent_job_id`），`GET /parents/{id}` 的 `children[]` 不再是空数组**；X0 的 `run_artifacts` 读写与 `/provenance` 已落两个实现 + HTTP。**已收口（2026-11-11）**：worker 领取执行（`SVC-ORCH-G3`，`ClaimByKernel` 与 `ArtifactStore.SaveArtifact` 的生产消费方是 core 的 `cmd/worker`）、worker 端点（施工 ⑪）、鉴权 R5（`SVC-ORCH-G1`）均已落；`pkg/backtest` 侧迁移属 core（见 `tellurion:docs/TASKS.md`）。判据是「队列可运行、父计划可提交 / 可入队 / 可汇总落库、三 hash 可从 HTTP 读写、core worker 可领取并跑通真引擎」。
