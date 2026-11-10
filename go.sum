@@ -68,6 +68,8 @@ github.com/ruoxizhnya/tellurion-contracts v0.9.0 h1:OqAZIXTUE4XM2rSR4QAzcTe3/iA6
 github.com/ruoxizhnya/tellurion-contracts v0.9.0/go.mod h1:F8trdn54YaEx1/gRsDpZ/aLX7XZycyB5o5N2OgOHaSA=
 github.com/ruoxizhnya/tellurion-kit v0.1.4 h1:sRFnvh5XNKIXb3YYJVHI1A59zkjgqf9SbSAyU7vslSY=
 github.com/ruoxizhnya/tellurion-kit v0.1.4/go.mod h1:VnVSZdoDazVODGxEW8tOGBocrJH1wbjW8ALdefluR5c=
+github.com/ruoxizhnya/tellurion-kit v0.2.0 h1:OKpy9mn+V7M/dE6ZDjoGVA+f4FRd0f/God2p4n4Hoz0=
+github.com/ruoxizhnya/tellurion-kit v0.2.0/go.mod h1:VnVSZdoDazVODGxEW8tOGBocrJH1wbjW8ALdefluR5c=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.4.0/go.mod h1:YvHI0jy2hoMjB+UWwv71VJQ9isScKT/TqJzVSSt89Yw=
 github.com/stretchr/objx v0.5.0/go.mod h1:Yh+to48EsGEfYuaHDzXPcE3xhTkx73EhmCGUpEOglKo=
