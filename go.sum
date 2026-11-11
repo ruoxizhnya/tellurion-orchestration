@@ -64,10 +64,8 @@ github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRI
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/rogpeppe/go-internal v1.16.0 h1:O9DK+vNMDVGLr2BeZqmpLeMjiMNkuXfcqntWbZV6S5g=
 github.com/rogpeppe/go-internal v1.16.0/go.mod h1:DrUVZyrJU+txYW5/1kwtXQSMFio52ZOxX7yM1VHvnxs=
-github.com/ruoxizhnya/tellurion-contracts v0.9.0 h1:OqAZIXTUE4XM2rSR4QAzcTe3/iA6DZv8zeGuIkOqLLM=
-github.com/ruoxizhnya/tellurion-contracts v0.9.0/go.mod h1:F8trdn54YaEx1/gRsDpZ/aLX7XZycyB5o5N2OgOHaSA=
-github.com/ruoxizhnya/tellurion-kit v0.1.4 h1:sRFnvh5XNKIXb3YYJVHI1A59zkjgqf9SbSAyU7vslSY=
-github.com/ruoxizhnya/tellurion-kit v0.1.4/go.mod h1:VnVSZdoDazVODGxEW8tOGBocrJH1wbjW8ALdefluR5c=
+github.com/ruoxizhnya/tellurion-contracts v0.10.0 h1:y5mOkKV5eVE7kaEq1A/Uu1+ADeokGdZWjKNOsANloIQ=
+github.com/ruoxizhnya/tellurion-contracts v0.10.0/go.mod h1:F8trdn54YaEx1/gRsDpZ/aLX7XZycyB5o5N2OgOHaSA=
 github.com/ruoxizhnya/tellurion-kit v0.2.0 h1:OKpy9mn+V7M/dE6ZDjoGVA+f4FRd0f/God2p4n4Hoz0=
 github.com/ruoxizhnya/tellurion-kit v0.2.0/go.mod h1:VnVSZdoDazVODGxEW8tOGBocrJH1wbjW8ALdefluR5c=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
