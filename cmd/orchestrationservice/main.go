@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -81,6 +82,8 @@ func run() error {
 			"JWT secret shared with core（空 = 回环开放访问；非回环无 secret 拒绝启动）")
 		exposure = flag.String("insecure-exposure", os.Getenv("AUTH_INSECURE_EXPOSURE"),
 			"非回环绑定时的显式开放声明（只接受 loopback-published）")
+		allowInsecure = flag.Bool("allow-insecure", envBool("AUTH_ALLOW_INSECURE", true),
+			"允许无 secret 的降级/开放态（false = JWT_SECRET 必填，缺则拒绝启动）")
 	)
 	flag.Parse()
 
@@ -89,13 +92,23 @@ func run() error {
 		return err
 	}
 
-	// 启动闸（裁-15）：有 secret ⇒ 鉴权；无 secret + 回环 ⇒ 开放；无 secret + 非回环 ⇒ 拒绝启动。
-	startup := kithttp.DecideStartup(*jwtSecret, true, bindHost(*addr), *exposure)
-	if startup.Refuse {
-		return fmt.Errorf("auth: %s", startup.Reason)
+	// 三态启动裁决（2026-11-12 收紧）：
+	//   1. 有 secret                → 全闸；
+	//   2. 无 secret + 无显式声明    → 只读降级：读端点公开，写端点 503 auth_unavailable；
+	//   3. 无 secret + AUTH_INSECURE_EXPOSURE=loopback-published + 回环绑定
+	//      → 显式开放（启动 WARN 点名「写面无鉴权」）；非回环绑定直接拒绝启动。
+	// allowInsecure 来自配置（AUTH_ALLOW_INSECURE / -allow-insecure），不再是代码里的常量。
+	mode, err := resolveAuthMode(*jwtSecret, *allowInsecure, bindHost(*addr), *exposure)
+	if err != nil {
+		return fmt.Errorf("auth: %w", err)
 	}
-	if startup.Insecure {
-		log.Printf("orchestrationservice: WARNING authentication disabled (open access); bind address %q is loopback-only", *addr)
+	switch mode {
+	case authModeOpen:
+		log.Printf("orchestrationservice: WARNING authentication DISABLED (AUTH_INSECURE_EXPOSURE=loopback-published): " +
+			"write endpoints have NO authentication — the publish layer MUST stay on loopback")
+	case authModeDegraded:
+		log.Printf("orchestrationservice: WARNING authentication is not configured (no JWT_SECRET): " +
+			"read endpoints are public, write endpoints answer 503 auth_unavailable")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -155,12 +168,23 @@ func run() error {
 		return fmt.Errorf("-worker-lease must be positive, got %s", *workerLease)
 	}
 
-	tokens := auth.NewTokenService(auth.Config{JWTSecret: startup.Secret})
+	var tokens *auth.TokenService
+	var authorizer httpapi.Authorizer
+	if mode == authModeOpen {
+		authorizer = httpapi.NewOpenAuthorizer()
+	} else {
+		secret := ""
+		if mode == authModeEnforced {
+			secret = *jwtSecret
+		}
+		tokens = auth.NewTokenService(auth.Config{JWTSecret: []byte(secret)})
+		authorizer = httpapi.NewAuthorizer(tokens)
+	}
 
 	api := httpapi.New(deps.Jobs,
 		httpapi.WithParents(deps.Parents),
 		httpapi.WithArtifacts(deps.Artifacts),
-		httpapi.WithAuthorizer(httpapi.NewAuthorizer(tokens)),
+		httpapi.WithAuthorizer(authorizer),
 		httpapi.WithRateLimit(*ratePerSec, *rateBurst),
 		httpapi.WithWorkers(deps.Workers, httpapi.WorkerOptions{Lease: *workerLease})).Handler()
 
@@ -179,7 +203,7 @@ func run() error {
 	}()
 
 	log.Printf("orchestrationservice: listening on %s (max_pending=%d, reap=%s, heartbeat_timeout=%s, auth=%t, auth_scope=%s, rate_limit=%g/s burst=%d)",
-		*addr, *depth, *reapEvery, *heartbeatTO, tokens.Enabled(), httpapi.AuthStatus, *ratePerSec, *rateBurst)
+		*addr, *depth, *reapEvery, *heartbeatTO, mode == authModeEnforced, httpapi.AuthStatus, *ratePerSec, *rateBurst)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("listen: %w", err)
 	}
@@ -254,6 +278,58 @@ func bindHost(addr string) string {
 		return addr
 	}
 	return host
+}
+
+// authMode 是本进程的鉴权三态（六仓统一口径）。
+type authMode int
+
+const (
+	// authModeEnforced：有 JWT_SECRET，所有端点过 kit 闸（401 / 403）。
+	authModeEnforced authMode = iota
+	// authModeDegraded：无 secret、无显式开放声明。读端点公开，写端点 503。
+	authModeDegraded
+	// authModeOpen：无 secret + 显式 loopback-published + 回环绑定，写面全开放。
+	authModeOpen
+)
+
+// resolveAuthMode 按三态口径裁决启动模式；返回 error = 拒绝启动。
+//
+// 第 2 态不看 bindHost：容器里必然绑 0.0.0.0，回环约束在发布层（compose 的
+// `127.0.0.1:` 端口映射）。进程无法自证发布层，所以降级态以「写面恒 503」
+// 作为安全兜底——即使绑定被误暴露，也只泄露只读面。
+func resolveAuthMode(secret string, allowInsecure bool, host, exposure string) (authMode, error) {
+	if strings.TrimSpace(secret) != "" {
+		return authModeEnforced, nil
+	}
+	if !allowInsecure {
+		return 0, errors.New("JWT secret missing and insecure mode disabled (AUTH_ALLOW_INSECURE=false) — refusing to start")
+	}
+	switch strings.TrimSpace(exposure) {
+	case "":
+		return authModeDegraded, nil
+	case kithttp.InsecureExposureLoopbackPublished:
+		if !kithttp.IsLoopbackHost(host) {
+			return 0, fmt.Errorf("AUTH_INSECURE_EXPOSURE=%s requires a loopback bind, got %q — refusing to start",
+				kithttp.InsecureExposureLoopbackPublished, host)
+		}
+		return authModeOpen, nil
+	default:
+		return 0, fmt.Errorf("unknown AUTH_INSECURE_EXPOSURE %q (only %q is accepted) — refusing to start",
+			exposure, kithttp.InsecureExposureLoopbackPublished)
+	}
+}
+
+// envBool 解析布尔环境变量；缺省或无法解析时返回 def。
+func envBool(name string, def bool) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return def
+	}
+	return v
 }
 
 // envFirst 按顺序取第一个非空环境变量（core 历史用法 JWT_SECRET、配置口径 AUTH_JWT_SECRET）。

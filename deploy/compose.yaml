@@ -18,13 +18,13 @@ services:
       # 凭证来源（QT-77）：验签方口径本服务**已全量持证**——`SVC-ORCH-G1`
       # （2026-11-09）起 `/api/*` 16 条路由全部 service 角色；`/healthz` /
       # `/readyz` 公开。R5 最小面先由 `SVC-ORCH-G2` 覆盖 artifact 写端点。
-      # 空值 = 回环开放访问；非回环无 secret 由启动闸拒绝。签发/轮换见
-      # tellurion:docs/SPEC.md 的「服务间凭证」节。
+      # 空值 = 第 2 态：读端点公开，写端点 503 auth_unavailable（不再有公开默认 secret）。
+      # 要写必须由部署方注入 JWT_SECRET，并给调用方（core worker / analysis）配套 token。
+      # 签发/轮换见 tellurion:docs/SPEC.md 的「服务间凭证」节。
       JWT_SECRET: ${JWT_SECRET:-}
-      # 容器内绑 0.0.0.0（否则端口发不出去），但端口只发布在宿主回环 ——
-      # 无 secret 时靠这一项让启动闸（kit DecideStartup）放行；缺它则
-      # `docker compose up` 会按设计拒绝启动。
-      AUTH_INSECURE_EXPOSURE: ${AUTH_INSECURE_EXPOSURE:-loopback-published}
+      # 显式开放仅限回环绑定（第 3 态）：容器内绑 0.0.0.0 时填 loopback-published
+      # 会被启动闸拒绝，默认留空即落到第 2 态。
+      AUTH_INSECURE_EXPOSURE: ${AUTH_INSECURE_EXPOSURE:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

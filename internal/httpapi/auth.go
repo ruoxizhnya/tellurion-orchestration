@@ -15,6 +15,9 @@ import (
 var (
 	ErrUnauthenticated = errors.New("no valid credentials")
 	ErrForbidden       = errors.New("insufficient role")
+	// ErrAuthUnavailable = 进程起来了但没配 secret（第 2 态）：读端点公开，
+	// 写端点必须 503。绝不能把「没配 secret」当成放行。
+	ErrAuthUnavailable = errors.New("authentication is not configured")
 )
 
 // Authorizer 是受保护路由的鉴权闸。nil = 闸未装配，受保护路由必须拒绝服务。
@@ -33,17 +36,38 @@ func WithAuthorizer(a Authorizer) Option {
 
 // NewAuthorizer 用 kit 的 net/http 适配构造鉴权闸：token 解析 / kind=access /
 // 角色 any-of 都在 kit，本仓只提供 policy 表（policy.go）。
-// TokenService 未启用（无 secret + 回环的显式开放）时放行。
+//
+// TokenService 未启用（无 secret）时**不再放行**：读端点保持公开，写端点
+// 一律 503 auth_unavailable（三态中的第 2 态）。要全放行必须显式装配
+// NewOpenAuthorizer，且只有启动期已裁决 AUTH_INSECURE_EXPOSURE=loopback-published
+// 的进程才允许这样做。
 func NewAuthorizer(svc *auth.TokenService) Authorizer {
 	return kitAuthorizer{svc: svc}
 }
 
+// NewOpenAuthorizer 是显式全放行闸（三态中的第 3 态）。
+//
+// 只在启动期已经接受 AUTH_INSECURE_EXPOSURE=loopback-published + 回环绑定
+// 时装配；装配点必须同时打「写面无鉴权」WARN。不要用它来让「忘了配 secret」
+// 的进程跑起来——那是第 2 态，走 NewAuthorizer。
+func NewOpenAuthorizer() Authorizer {
+	return kitAuthorizer{open: true}
+}
+
 type kitAuthorizer struct {
-	svc *auth.TokenService
+	svc  *auth.TokenService
+	open bool
 }
 
 func (a kitAuthorizer) Authorize(r *http.Request) (string, error) {
+	if a.open {
+		return "", nil
+	}
 	if a.svc == nil || !a.svc.Enabled() {
+		if kithttp.IsMutating(r.Method) {
+			return "", fmt.Errorf("%w: JWT secret is not configured", ErrAuthUnavailable)
+		}
+		// 读端点：无 secret 的只读降级仍可用（第 2 态）。
 		return "", nil
 	}
 	key := kithttp.RouteKey(r)
@@ -109,6 +133,8 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 				return
 			}
 			next.ServeHTTP(w, r)
+		case errors.Is(err, ErrAuthUnavailable):
+			writeJSON(w, http.StatusServiceUnavailable, errorBody{Error: "authentication is not configured", Code: "auth_unavailable"})
 		case errors.Is(err, ErrUnauthenticated):
 			writeJSON(w, http.StatusUnauthorized, errorBody{Error: "authentication required", Code: "unauthenticated"})
 		case errors.Is(err, ErrForbidden):

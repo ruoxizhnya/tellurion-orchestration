@@ -375,3 +375,42 @@ func TestTwoProcessesShareTheQueueAgainstPG(t *testing.T) {
 		t.Fatalf("row count = %d, want 1", rows)
 	}
 }
+
+// TestResolveAuthMode 钉住启动期三态裁决与拒绝条件（六仓统一口径）。
+func TestResolveAuthMode(t *testing.T) {
+	cases := []struct {
+		name          string
+		secret        string
+		allowInsecure bool
+		host          string
+		exposure      string
+		want          authMode
+		wantErr       bool
+	}{
+		{"secret wins", "s3cret", true, "0.0.0.0", "", authModeEnforced, false},
+		{"secret wins even with insecure disabled", "s3cret", false, "127.0.0.1", "", authModeEnforced, false},
+		{"no secret + no declaration = degraded", "", true, "127.0.0.1", "", authModeDegraded, false},
+		{"no secret + container bind + no declaration = degraded", "", true, "0.0.0.0", "", authModeDegraded, false},
+		{"explicit declaration on loopback = open", "", true, "127.0.0.1", "loopback-published", authModeOpen, false},
+		{"explicit declaration on non-loopback refuses", "", true, "0.0.0.0", "loopback-published", 0, true},
+		{"unknown declaration refuses", "", true, "127.0.0.1", "loopback", 0, true},
+		{"insecure disabled refuses without secret", "", false, "127.0.0.1", "", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveAuthMode(tc.secret, tc.allowInsecure, tc.host, tc.exposure)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("resolveAuthMode = %v, want error (refuse to start)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveAuthMode error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("resolveAuthMode = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

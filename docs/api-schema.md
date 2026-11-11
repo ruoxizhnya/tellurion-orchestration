@@ -214,7 +214,7 @@ verified-by: ORCH-RATELIMIT（2026-11-12：按调用方身份令牌桶 + 所有 
 | `queue_full` | 429 | 待领取深度达上限（含父作业逐条入队子 run 时） | 按 `Retry-After` 退避重试；父记录保留，重放同一请求按幂等键补齐；**不 silently 丢弃** |
 | `artifact_conflict` | 409 | artifact 写：同 `run_id` 但身份字段（`strategy_ref` / 三 hash / kernel / engine_version / fill_timing）不同 | 不重试；确认上游是否换了身份，换身份应换 run |
 | `artifact_not_found` | 404 | 读路径查不到 artifact 行（写路径首次写入**不**返回本码） | 先写 artifact；不重试读取 |
-| `auth_unavailable` | 503 | 受保护路由未装配鉴权闸（装配错误，非调用方问题） | 联系运维；不重试业务 |
+| `auth_unavailable` | 503 | 受保护路由未装配鉴权闸，或无 `JWT_SECRET` 时访问写端点（第 2 态） | 联系运维；补 secret 或改用只读面，不重试业务 |
 
 **限流（ORCH-RATELIMIT，2026-11-12）**：与 data / risk / analytics / strategy 同口径，按调用方身份的**令牌桶**（`internal/httpapi/limit.go`，进程内、不跨副本，不引新依赖）。
 
@@ -269,5 +269,9 @@ verified-by: ORCH-RATELIMIT（2026-11-12：按调用方身份令牌桶 + 所有 
 - **代码登记**：`internal/httpapi/policy.go` 的 `AuthStatus = "all-endpoints-service"` 与策略表（`/api/*` 全部 16 条路由 → `service` 角色）。
 - **全量 R5（2026-11-09，`SVC-ORCH-G1`）**：每一条 `/api/*` 路由都过 `requireAuth`——未装配鉴权 → 503 `auth_unavailable`，无凭证 → 401，角色不足 → 403。公开面只有进程入口的 `/healthz`（进程活着）与 `/readyz`（装配齐）。`service` 是**服务间**角色：core worker（领取 / 续租 / 上报 / artifact）与 analytics（父作业提交 / 查询）持同一档；真人今天走 core 入口，不直连本仓。
 - **wire 形状归 contracts（2026-11-09）**：claim / provenance / 父作业提交三类形状已统一为 `contracts/run`（`ClaimView` / `ProvenanceView` / `ParentSubmitRequest` 族），本仓与 core 不再各写一份；§1 的字段表仍是对外行为描述，形状的唯一 Go 实现在契约包。
-- **fail-closed**：受保护路由未装配 Authorizer → `503 auth_unavailable`；无凭证 → `401 unauthenticated`；非 service → `403 forbidden`。启动闸同 core：有 `JWT_SECRET` 启用；无 secret + 回环 = 开放；无 secret + 非回环 = 拒绝启动。
+- **fail-closed 与三态（2026-11-12 收紧）**：受保护路由未装配 Authorizer → `503 auth_unavailable`；无凭证 → `401 unauthenticated`；非 service → `403 forbidden`。启动/运行分三态：
+  1. **有 `JWT_SECRET`** → 全闸；
+  2. **无 secret + 无显式声明** → 进程能起，读端点公开，写端点（含 `POST /api/runs/jobs`、worker claim/lease/result、artifact 写）一律 `503 auth_unavailable`；
+  3. **无 secret + `AUTH_INSECURE_EXPOSURE=loopback-published` + 回环绑定** → 写面显式开放（启动 WARN「写面无鉴权」），非回环绑定启动即拒；`AUTH_ALLOW_INSECURE=false` 时无 secret 一律拒绝启动。
+  锚点 = `TestAuthPostureThreeStates`（三态状态码 + code）、`TestResolveAuthMode`（启动裁决与拒绝条件）。
 - **service token 的签发 / 分发不在本仓**：归 `tellurion:QT-77`；本仓只校验。
