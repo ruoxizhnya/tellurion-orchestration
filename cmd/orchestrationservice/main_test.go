@@ -196,6 +196,13 @@ func TestReadyzFailsClosed(t *testing.T) {
 	}
 }
 
+// allowAllAuthorizer 替身：本用例考的是「队列真相在库里、跨进程可见」，
+// 鉴权策略本身由 internal/httpapi 的用例覆盖。但不能不装——R5 之后未装配
+// Authorizer 的受保护路由一律 503（fail-closed），漏装会让提交永远拿不到 202。
+type allowAllAuthorizer struct{}
+
+func (allowAllAuthorizer) Authorize(*http.Request) error { return nil }
+
 // TestTwoProcessesShareTheQueueAgainstPG 是「接 PG」这件事的端到端判据：
 // 进程 A（HTTP 面）提交，进程 B（另一个 Store 实例，独立连接池）领取并写终态，
 // A 再查就必须看到 B 写的结果——队列的真相在库里，不在任何进程的内存里。
@@ -232,7 +239,7 @@ func TestTwoProcessesShareTheQueueAgainstPG(t *testing.T) {
 		t.Fatalf("register A: %v", err)
 	}
 	jobsA := a.Queue(workersA, pgstore.Options{MaxQueueDepth: 3, DefaultMaxAttempts: 2})
-	srv := httptest.NewServer(httpapi.New(jobsA).Handler())
+	srv := httptest.NewServer(httpapi.New(jobsA, httpapi.WithAuthorizer(allowAllAuthorizer{})).Handler())
 	defer srv.Close()
 
 	submit, err := http.Post(srv.URL+"/api/runs/jobs", "application/json",
