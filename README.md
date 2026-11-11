@@ -1,5 +1,7 @@
 # tellurion-orchestration
 
+> 5 分钟了解本服务：[SERVICE.md](SERVICE.md)
+
 > module: `tellurion-orchestration` ｜ 状态：**已收口（2026-11-11 台账清零）**——X5a/X5c（`JobQueue` + `WorkerRegistry` + `run` schema DDL + PG 实现 + 启动迁移）、X5b（`internal/plan` + `run.parent_jobs` + 父 2 端点 + 子 run 入队）、X0（`run_artifacts` 读写 + `/provenance` + artifact 写端点）、worker 打活面（8 端点）全部已落；全量 R5 16 条路由 service 角色、`/readyz`、失败语义五类见 `docs/runbook.md`。`cmd/dualrun` 已裁决留 core，不在本仓
 
 编排 / worker 服务：job / batch / walkforward 的算力出口，schema `run`。把"批量扫"从 core 进程里搬出来。
