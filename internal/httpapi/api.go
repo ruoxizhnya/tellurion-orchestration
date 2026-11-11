@@ -33,6 +33,7 @@ type Server struct {
 	psvc        *parents.Service
 	artifacts   queue.ArtifactStore
 	authorizer  Authorizer
+	limiter     *rateLimiter
 	workers     queue.WorkerRegistry
 	workerLease time.Duration
 	mux         *http.ServeMux
@@ -65,9 +66,27 @@ func WithArtifacts(store queue.ArtifactStore) Option {
 	}
 }
 
+// WithRateLimit 覆盖默认限流（每秒 perSecond 个令牌、突发 burst）。
+// perSecond <= 0 或 burst <= 0 ⇒ 关闭限流（仅测试用）。默认值与兄弟仓
+// 一致（50 rps / 突发 200），部署参数见 cmd/orchestrationservice 的
+// `-rate-limit` / `-rate-limit-burst`。
+func WithRateLimit(perSecond float64, burst int) Option {
+	return func(s *Server) {
+		if perSecond <= 0 || burst <= 0 {
+			s.limiter = nil
+			return
+		}
+		s.limiter = newRateLimiter(perSecond, float64(burst))
+	}
+}
+
 // New 构造 Server 并注册路由。
 func New(q queue.JobQueue, opts ...Option) *Server {
-	s := &Server{q: q, mux: http.NewServeMux()}
+	s := &Server{
+		q:       q,
+		mux:     http.NewServeMux(),
+		limiter: newRateLimiter(DefaultRateLimitPerSecond, DefaultRateLimitBurst),
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -378,6 +397,11 @@ func writeError(w http.ResponseWriter, err error) {
 	if status == http.StatusInternalServerError {
 		log.Printf("httpapi: internal error: %v", err)
 		msg = "internal error"
+	}
+	// 所有 429（queue_full 等）都带 Retry-After：调用方据此区分「队列满」
+	// 与「服务坏」，知道何时重试（与限流 429 `rate_limited` 同口径）。
+	if status == http.StatusTooManyRequests {
+		w.Header().Set("Retry-After", retryAfterSeconds)
 	}
 	writeJSON(w, status, errorBody{Error: msg, Code: code})
 }

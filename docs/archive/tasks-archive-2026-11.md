@@ -14,6 +14,7 @@
 | QT-44 | X5 编排 / worker 服务（job/batch/walkforward 上移） | 2026-11-10 | `dbe4c68` | [原文](#QT-44)；[`ARCHITECTURE.md`](ARCHITECTURE.md) |
 | SVC-ORCH-G2 | 服务就绪门 G2：`run.*` 唯一 writer · artifact 写端点 · 迁移重放（ADR-036） | 2026-11-07 | —（原文未记） | [原文](#SVC-ORCH-G2) |
 | SVC-ORCH-G4 | 服务就绪门 G4：租约/回收的失败语义 · worker 可观测 · runbook（ADR-036） | 2026-11-07 | —（原文未记） | [原文](#SVC-ORCH-G4) |
+| ORCH-RATELIMIT | 编排服务无身份限流，429 不带 Retry-After | 2026-11-12 | —（见 `git log --grep ORCH-RATELIMIT`） | [原文](#ORCH-RATELIMIT) |
 
 ---
 
@@ -358,5 +359,25 @@
 | QT-44 | X5 编排 / worker 服务（job/batch/walkforward 上移） | 已迁入本仓「一、本仓任务」（2026-10-21；core `tellurion:docs/TASKS.md` 留同号指针） |
 | QT-08 | 本仓 CI / AGENTS / 台账由该单一并补齐 | `tellurion:docs/TASKS.md` |
 | CT-04 | 编排 wire 形状已落 contracts（`run/`：`ClaimView` / `ProvenanceView` / `ParentSubmitRequest` 族 + 子 run 幂等键） | `tellurion-contracts:docs/TASKS.md`（✅ 2026-11-07；`v0.8.0` → `v0.9.0` 已可经远端解析）；本仓与 core 的收编已落（`SVC-ORCH-G1` 施工记录 2026-11-09） |
+
+---
+
+<a id="ORCH-RATELIMIT"></a>
+### ORCH-RATELIMIT · 编排服务无身份限流，429 不带 Retry-After [P2] ✅（2026-11-12）
+
+- **① 目标**：让本仓与四个兄弟服务（data/risk/analytics/strategy）一样有**按调用方身份的令牌桶限流**，且所有 429 响应带 `Retry-After`，使调用方能区分「限流/队列满」与「服务坏」并知道何时重试。
+- **② 上下文（2026-11-11 全面审查 W2-F6，证据 ODR-069 `tellurion-docs:docs/archive/odr/odr-069-audit-wave2-core-architecture.md`）**：本仓 `internal/httpapi/` **无 `limit.go`**（data/risk/analytics/strategy 四仓均有按身份令牌桶，默认 50 rps / 突发 200、探针豁免、鉴权先于限流）；本仓唯一 429 是 `queue_full`（`internal/httpapi/api.go:351-352` `case errors.Is(err, queue.ErrQueueFull): return http.StatusTooManyRequests, "queue_full"`），**不带 `Retry-After`**（grep 全 httpapi 零命中）。对照 risk `internal/httpapi/auth.go:96` 限流 429 带 `Retry-After: 1`。冻结参照 = 兄弟仓 api-schema 的限流口径（如 `tellurion-data:docs/api-schema.md` 限流节）与本仓 `docs/api-schema.md` wire 词表。
+- **③ 要求**：① 增按身份令牌桶限流（身份取值口径与兄弟仓一致：`username`→`subject`→`open-access` 共用一桶；默认 50 rps / 突发 200；`/healthz` `/readyz` 探针豁免）；② **鉴权先于限流**（401/403 不被 429 顶替）；③ 新增 `rate_limited` 429 与既有 `queue_full` 429 **都带 `Retry-After`**；④ `docs/api-schema.md` 登记 `rate_limited` 码与两码的 `Retry-After` 口径；⑤ 限流参数可配（与兄弟仓同口径，不硬编码死）。
+- **④ 约束与非目标**：不改队列语义 / `Claim` / `FOR UPDATE SKIP LOCKED` / 父作业汇总；不引入 MQ；不改鉴权策略表（16 条路由 service 角色不动）；不把 `queue_full` 改成别的 status；不新增第三方依赖前先核兄弟仓用的是哪个限流库（优先复用同款，避免第二套）。
+- **⑤ 验收**：用例断言超限 ⇒ 429 `rate_limited` + `Retry-After` 非空、`queue_full` ⇒ 429 + `Retry-After` 非空、探针不限流、401 不被 429 顶替；破坏验证 = 去掉 `Retry-After` 设置 ⇒ 用例红，还原复绿；`go build/vet/test ./... -count=1` 全绿。
+- **⑥ 边界**：本仓 `internal/httpapi/`（新增 limit + 改 429 写头）+ `docs/api-schema.md`；broker 的 `rate_limited` 缺 Retry-After 归 `tellurion-broker:docs/TASKS.md` → `BROKER-RETRY-AFTER`。
+- **owner**：待定
+
+**施工记录（2026-11-12）**：
+- **落地**：新增 `internal/httpapi/limit.go`（进程内按身份令牌桶，默认 50 rps / 突发 200，与兄弟仓同款同参数，未引新依赖）；`Authorizer.Authorize` 改为返回 `(principal, error)`（`username`→`subject`→`open-access`），`requireAuth` 在**鉴权成功后**才过桶，超限 429 `rate_limited` + `Retry-After: 1`；`writeError` 对**所有 429**（含 `queue_full`）统一写 `Retry-After`；`Server` 新增 `limiter` 与 `WithRateLimit`；`cmd/orchestrationservice` 新增 `-rate-limit` / `-rate-limit-burst` 部署参数（<=0 关闭）。
+- **用例**：`internal/httpapi/limit_test.go` 四条（超限、`queue_full`、鉴权先于限流、身份分桶隔离）；`cmd/orchestrationservice/main_test.go` `TestProbesExemptFromRateLimit` 钉探针豁免（`/healthz` `/readyz` 连打 5 次不 429，业务面第 2 次即 429 + `Retry-After`）。
+- **破坏验证（真做真还原）**：临时删除 `requireAuth` 与 `writeError` 两处 `Retry-After` 设置 ⇒ `TestRateLimitOverLimitHasRetryAfter` / `TestQueueFull429HasRetryAfter` / `TestAuthPrecedesRateLimit` / `TestProbesExemptFromRateLimit` 四条全红（逐条报「429 … without Retry-After」）；逐字节还原后 `go test ./... -count=1` 复绿。
+- **文档**：`docs/api-schema.md`（§1 探针不占桶、§2 `rate_limited` 新行 + `queue_full` `Retry-After` 口径 + 限流节）。
+- **门禁（真实退出码）**：`go build ./...`=0、`go vet ./...`=0、`go test ./... -count=1`=0（`cmd/orchestrationservice`、`internal/httpapi`、`internal/parents`、`internal/pgstore`、`internal/plan`、`internal/queue` 全 ok）。
 
 ---

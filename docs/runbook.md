@@ -82,6 +82,8 @@ docker compose -f deploy/compose.yaml up -d
 | `-reap-interval` | — | `30s` | 回收周期；`0` = 关闭两类回收 |
 | `-heartbeat-timeout` | — | `90s` | 心跳超时 → worker `offline`；`0` = 关闭心跳回收 |
 | `-worker-lease` | — | `60s` | worker 领取时写入的 `lease_until` |
+| `-rate-limit` | — | `50` | 按调用方身份的令牌桶：每秒令牌数（与兄弟仓同口径；`<=0` 关闭） |
+| `-rate-limit-burst` | — | `200` | 令牌桶突发上限（`<=0` 关闭） |
 | `-startup-timeout` | — | `30s` | 连库 + 迁移的超时 |
 | `-jwt-secret` | `JWT_SECRET` / `AUTH_JWT_SECRET` | 空 | 有 secret ⇒ 鉴权；空 + 回环 ⇒ 开放；空 + 非回环 ⇒ 拒绝启动 |
 | `-insecure-exposure` | `AUTH_INSECURE_EXPOSURE` | 空 | 非回环绑定的显式开放声明（只接受 `loopback-published`） |
@@ -89,7 +91,7 @@ docker compose -f deploy/compose.yaml up -d
 启动日志会打印实际生效值：
 
 ```text
-orchestrationservice: listening on 127.0.0.1:8088 (max_pending=10000, reap=30s, heartbeat_timeout=1m30s, auth=false, auth_scope=write-endpoint-only)
+orchestrationservice: listening on 127.0.0.1:8088 (max_pending=10000, reap=30s, heartbeat_timeout=1m30s, auth=false, auth_scope=all-endpoints-service, rate_limit=50/s burst=200)
 ```
 
 ## 2. 探针：`/healthz` 与 `/readyz`

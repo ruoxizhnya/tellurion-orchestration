@@ -21,7 +21,7 @@ import (
 // allowAllAuthorizer 只给「不测鉴权」的用例用；生产装配永远过 kit。
 type allowAllAuthorizer struct{}
 
-func (allowAllAuthorizer) Authorize(*http.Request) error { return nil }
+func (allowAllAuthorizer) Authorize(*http.Request) (string, error) { return "", nil }
 
 func newArtifactServer(t *testing.T, tokens *auth.TokenService) (*Server, *queue.Memory, *queue.MemoryArtifacts, *time.Time) {
 	t.Helper()

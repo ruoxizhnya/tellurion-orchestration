@@ -74,6 +74,8 @@ func run() error {
 		reapEvery   = flag.Duration("reap-interval", 30*time.Second, "租约回收周期（0 = 关闭）")
 		heartbeatTO = flag.Duration("heartbeat-timeout", 90*time.Second, "超过该时长没有心跳的 worker → offline（0 = 关闭；按 worker 心跳间隔配置）")
 		workerLease = flag.Duration("worker-lease", httpapi.DefaultWorkerLease, "worker 领取时写入的租约时长（worker 必须在此之前续租）")
+		ratePerSec  = flag.Float64("rate-limit", httpapi.DefaultRateLimitPerSecond, "按调用方身份的令牌桶：每秒令牌数（与兄弟仓同口径，<=0 关闭）")
+		rateBurst   = flag.Int("rate-limit-burst", httpapi.DefaultRateLimitBurst, "令牌桶突发上限（<=0 关闭）")
 		startupTO   = flag.Duration("startup-timeout", 30*time.Second, "连库 + 迁移的超时")
 		jwtSecret   = flag.String("jwt-secret", envFirst("JWT_SECRET", "AUTH_JWT_SECRET"),
 			"JWT secret shared with core（空 = 回环开放访问；非回环无 secret 拒绝启动）")
@@ -159,6 +161,7 @@ func run() error {
 		httpapi.WithParents(deps.Parents),
 		httpapi.WithArtifacts(deps.Artifacts),
 		httpapi.WithAuthorizer(httpapi.NewAuthorizer(tokens)),
+		httpapi.WithRateLimit(*ratePerSec, *rateBurst),
 		httpapi.WithWorkers(deps.Workers, httpapi.WorkerOptions{Lease: *workerLease})).Handler()
 
 	srv := &http.Server{
@@ -175,8 +178,8 @@ func run() error {
 		}
 	}()
 
-	log.Printf("orchestrationservice: listening on %s (max_pending=%d, reap=%s, heartbeat_timeout=%s, auth=%t, auth_scope=%s)",
-		*addr, *depth, *reapEvery, *heartbeatTO, tokens.Enabled(), httpapi.AuthStatus)
+	log.Printf("orchestrationservice: listening on %s (max_pending=%d, reap=%s, heartbeat_timeout=%s, auth=%t, auth_scope=%s, rate_limit=%g/s burst=%d)",
+		*addr, *depth, *reapEvery, *heartbeatTO, tokens.Enabled(), httpapi.AuthStatus, *ratePerSec, *rateBurst)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("listen: %w", err)
 	}

@@ -1,7 +1,7 @@
 ---
 status: active
-last-verified: 2026-11-11
-verified-by: 代码-文档对齐审计（2026-11-11：删除「worker 执行未落 / 生产者未落 / 全量鉴权未实现」，统一为 G1/G2/G3 + QT-44 已落口径；16 条路由与 policy 全覆盖复核）；SVC-ORCH-G1 契约收编 + 全量 R5（claim / provenance / 父作业请求三类 wire 形状改引 `contracts/run`；`/api/*` 16 条路由全部 service 角色，公开面只有 `/healthz` / `/readyz`）；SVC-ORCH-G4（`/healthz` / `/readyz` 分工）；SVC-ORCH-G2（artifact 写端点 `POST /api/runs/jobs/{id}/artifacts` + 新码 `artifact_conflict` / `artifact_not_found` / `auth_unavailable`）；2026-10-25 施工 ⑪（X5c worker 打活面）
+last-verified: 2026-11-12
+verified-by: ORCH-RATELIMIT（2026-11-12：按调用方身份令牌桶 + 所有 429 带 `Retry-After`；`rate_limited` 新码；鉴权先于限流、探针豁免）；代码-文档对齐审计（2026-11-11：删除「worker 执行未落 / 生产者未落 / 全量鉴权未实现」，统一为 G1/G2/G3 + QT-44 已落口径；16 条路由与 policy 全覆盖复核）；SVC-ORCH-G1 契约收编 + 全量 R5（claim / provenance / 父作业请求三类 wire 形状改引 `contracts/run`；`/api/*` 16 条路由全部 service 角色，公开面只有 `/healthz` / `/readyz`）；SVC-ORCH-G4（`/healthz` / `/readyz` 分工）；SVC-ORCH-G2（artifact 写端点 `POST /api/runs/jobs/{id}/artifacts` + 新码 `artifact_conflict` / `artifact_not_found` / `auth_unavailable`）；2026-10-25 施工 ⑪（X5c worker 打活面）
 ---
 
 # API Schema — tellurion-orchestration
@@ -26,7 +26,7 @@ verified-by: 代码-文档对齐审计（2026-11-11：删除「worker 执行未�
 | GET | `/healthz` | 进程在监听（`text/plain`：`ok`）；**不查任何依赖** |
 | GET | `/readyz` | 能接活：PG 池可连 + `run.*` 六表已迁移；未就绪 `503` + 原因 |
 
-两者都**不经过业务路由表**，也不在鉴权范围内（部署面必须无凭证可用）。`/healthz` 200 不代表服务可用；运维口径、失败语义与人工处置见 [`runbook.md`](runbook.md)。
+两者都**不经过业务路由表**，也不在鉴权范围内（部署面必须无凭证可用），**也不占限流桶**（否则探针 429 会被读成进程 / 依赖故障）。`/healthz` 200 不代表服务可用；运维口径、失败语义与人工处置见 [`runbook.md`](runbook.md)。
 
 ### 任务
 
@@ -210,10 +210,18 @@ verified-by: 代码-文档对齐审计（2026-11-11：删除「worker 执行未�
 | `provenance_not_ready` | 409 | job 非终态，provenance 尚未写 | 退避轮询 |
 | `provenance_not_found` | 404 | job 终态 `failed` / `cancelled` 且从未写 provenance（如路由拒绝 / 从未跑到写留痕那一步） | 读 job 的 `error`；不重试读取 |
 | `provenance_missing` | 500 | 终态为 `completed` / `invalid` 却查不到 `run_artifacts`（数据完整性破坏） | 告警；**不得**当成功使用 |
-| `queue_full` | 429 | 待领取深度达上限（含父作业逐条入队子 run 时） | 退避重试；父记录保留，重放同一请求按幂等键补齐；**不 silently 丢弃** |
+| `rate_limited` | 429 | 同一调用方身份的令牌桶耗尽（默认 50 rps / 突发 200；探针豁免） | 按 `Retry-After` 退避重试；不并发重打 |
+| `queue_full` | 429 | 待领取深度达上限（含父作业逐条入队子 run 时） | 按 `Retry-After` 退避重试；父记录保留，重放同一请求按幂等键补齐；**不 silently 丢弃** |
 | `artifact_conflict` | 409 | artifact 写：同 `run_id` 但身份字段（`strategy_ref` / 三 hash / kernel / engine_version / fill_timing）不同 | 不重试；确认上游是否换了身份，换身份应换 run |
 | `artifact_not_found` | 404 | 读路径查不到 artifact 行（写路径首次写入**不**返回本码） | 先写 artifact；不重试读取 |
 | `auth_unavailable` | 503 | 受保护路由未装配鉴权闸（装配错误，非调用方问题） | 联系运维；不重试业务 |
+
+**限流（ORCH-RATELIMIT，2026-11-12）**：与 data / risk / analytics / strategy 同口径，按调用方身份的**令牌桶**（`internal/httpapi/limit.go`，进程内、不跨副本，不引新依赖）。
+
+- 分桶键 = `username` → `subject` → `open-access`（服务 token 只有 `sub`；无身份概念时全体共用一个开放桶）；默认 **50 rps / 突发 200**，部署可用 `-rate-limit` / `-rate-limit-burst` 覆盖（默认值与兄弟仓一致，<=0 关闭）。
+- **鉴权先于限流**：401 / 403 永远不会被 429 顶替；超限 = `429` + `code:"rate_limited"` + `Retry-After: 1`。
+- **所有 429 都带 `Retry-After`**：除 `rate_limited` 外，`queue_full` 同样带该头，调用方据此区分「限流 / 队列满」与「服务坏」。
+- **探针豁免**：`/healthz` / `/readyz` 挂在进程入口的 mux 上（不进业务路由表），不占限流桶。
 
 **非错误语义**：同幂等键重复提交 → **200 + 原 `job_id` + `idempotent_replay:true`**（视为成功，不重复跑）；取消 `running` → **202 + `cancelling`**（轮询确认终态）；取消 `pending` → **200 + `cancelled`**；取消终态 → 200 原状态（幂等）。
 

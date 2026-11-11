@@ -201,7 +201,52 @@ func TestReadyzFailsClosed(t *testing.T) {
 // Authorizer 的受保护路由一律 503（fail-closed），漏装会让提交永远拿不到 202。
 type allowAllAuthorizer struct{}
 
-func (allowAllAuthorizer) Authorize(*http.Request) error { return nil }
+func (allowAllAuthorizer) Authorize(*http.Request) (string, error) { return "", nil }
+
+// TestProbesExemptFromRateLimit 钉住 ORCH-RATELIMIT 的探针豁免：`/healthz`
+// `/readyz` 挂在进程入口的 mux 上，不进业务限流桶——同一进程里连打探针
+// 多少次都不 429，而业务面在突发耗尽后必须 429 且带 Retry-After。
+// 探针被限流 = 部署面把「限流」读成「进程/依赖坏了」，会误重启。
+func TestProbesExemptFromRateLimit(t *testing.T) {
+	api := httpapi.New(queue.NewMemory(),
+		httpapi.WithAuthorizer(allowAllAuthorizer{}),
+		httpapi.WithRateLimit(0.0001, 1),
+	).Handler()
+	srv := httptest.NewServer(newMux(api, fakeReadiness{}))
+	defer srv.Close()
+
+	get := func(path string) *http.Response {
+		t.Helper()
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp
+	}
+
+	for i := 0; i < 5; i++ {
+		if code := get("/healthz").StatusCode; code != http.StatusOK {
+			t.Fatalf("/healthz attempt %d = %d, want 200（探针不该占限流桶）", i, code)
+		}
+		if code := get("/readyz").StatusCode; code != http.StatusOK {
+			t.Fatalf("/readyz attempt %d = %d, want 200（探针不该占限流桶）", i, code)
+		}
+	}
+
+	// 业务面：突发 1 ⇒ 第一次 200，第二次 429 + Retry-After。
+	if code := get("/api/runs/jobs").StatusCode; code != http.StatusOK {
+		t.Fatalf("first business request = %d, want 200", code)
+	}
+	resp := get("/api/runs/jobs")
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second business request = %d, want 429", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Fatal("429 rate_limited without Retry-After")
+	}
+}
 
 // TestTwoProcessesShareTheQueueAgainstPG 是「接 PG」这件事的端到端判据：
 // 进程 A（HTTP 面）提交，进程 B（另一个 Store 实例，独立连接池）领取并写终态，
