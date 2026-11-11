@@ -393,13 +393,6 @@ func enqueue(t *testing.T, q queue.JobQueue, key, body string, created time.Time
 	return job
 }
 
-// enqueueWithID 允许显式指定 run id（重复 id 用例用）。
-func enqueueWithID(t *testing.T, q queue.JobQueue, id, key, body string) (*queue.RunRecord, bool, error) {
-	t.Helper()
-	rec := &queue.RunRecord{ID: id, IdempotencyKey: key, RequestJSON: []byte(body)}
-	return q.Enqueue(ctxT(t), rec)
-}
-
 // claim 领取一条；出错即 fatal（除非用例本来就在测错误）。
 func claim(t *testing.T, q queue.JobQueue, worker string, lease time.Duration) *queue.RunRecord {
 	t.Helper()

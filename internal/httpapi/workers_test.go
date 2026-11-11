@@ -215,7 +215,7 @@ func TestRenewLease_AndFencing(t *testing.T) {
 	// 推过租约后旧 owner 不能再续，也不能写结果。
 	*clock = baseTime.Add(2 * DefaultWorkerLease)
 	doWant(t, s, "POST", "/api/runs/jobs/"+id+"/lease", `{"worker_id":"w1"}`, 409, "lease_lost")
-	body := fmt.Sprintf(`{"worker_id":"w1","status":"completed","result_status":"completed","result_uri":"x"}`)
+	body := `{"worker_id":"w1","status":"completed","result_status":"completed","result_uri":"x"}`
 	doWant(t, s, "POST", "/api/runs/jobs/"+id+"/result", body, 409, "lease_lost")
 
 	// 行仍是 running（租约过期不自动回 pending；由 ReapExpired 负责）。

@@ -66,7 +66,8 @@ func TestMemoryOptionsDefaultsAreShared(t *testing.T) {
 		t.Fatal("NewRunID must yield a 32-hex id")
 	}
 	// 两条 id 必须不同（碰撞在这里不是理论问题：它是主键）。
-	if queue.NewRunID() == queue.NewRunID() {
-		t.Fatal("NewRunID returned the same id twice")
+	first, second := queue.NewRunID(), queue.NewRunID()
+	if first == second {
+		t.Fatalf("NewRunID returned the same id twice: %q", first)
 	}
 }

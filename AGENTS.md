@@ -53,11 +53,12 @@ go test ./...
 
 | 依赖 | 版本 | 说明 |
 |---|---|---|
-| `github.com/ruoxizhnya/tellurion-contracts` | `v0.9.0`（2026-11-08 发版；2026-11-09 `SVC-ORCH-G1` 引入） | `run` 包的 `ClaimView` / `ProvenanceView` / `ParentSubmitRequest` 族；claim / provenance / 父作业请求直接引用契约类型（`internal/httpapi`）。`RunSpec` / `ResultSpec` 仍走本地 wire 面；本仓零 import core |
-| `github.com/ruoxizhnya/tellurion-kit` | `v0.2.0`（2026-11-07 引入 `v0.1.4`，2026-11-10 随 kit `KT-13` 升） | `auth` + `auth/httpadapter`：全量 R5 的 token 解析 / 角色判定 / 启动闸（`DecideStartup`）；2026-11-09 起覆盖全部 `/api/*` 路由（16 条，service 角色），策略见 `internal/httpapi/policy.go` |
-| `github.com/jackc/pgx/v5` | `v5.7.3` | 2026-10-23 施工 ③ 登记。`internal/pgstore`（`run` schema 的 PG 实现：`JobQueue` / `WorkerRegistry` + `Migrate`）与 `cmd/orchestrationservice` 使用；版本与 core / kit / strategy / agent 对齐。**`internal/queue` 保持零第三方依赖**（port + DTO + 内存实现 + DDL 只用标准库），驱动只进 `pgstore` 一个包 |
+| `github.com/ruoxizhnya/tellurion-contracts` | `v0.10.0`（2026-11-12 随 `X-DEP-BUMP-CONSUMERS` 从 `v0.9.0` 升；2026-11-08 发版，2026-11-09 `SVC-ORCH-G1` 引入 `v0.9.0`） | `run` 包的 `ClaimView` / `ProvenanceView` / `ParentSubmitRequest` 族；claim / provenance / 父作业请求直接引用契约类型（`internal/httpapi`）。`RunSpec` / `ResultSpec` 仍走本地 wire 面；本仓零 import core |
+| `github.com/ruoxizhnya/tellurion-kit` | `v0.5.0`（2026-11-12 随 `X-DEP-BUMP-CONSUMERS` 从 `v0.2.0` 升；2026-11-07 引入 `v0.1.4`，2026-11-10 随 kit `KT-13` 升到 `v0.2.0`） | `auth` + `auth/httpadapter`：全量 R5 的 token 解析 / 角色判定 / 启动闸（`DecideStartup`）；2026-11-09 起覆盖全部 `/api/*` 路由（16 条，service 角色），策略见 `internal/httpapi/policy.go`。`v0.5.0` 新增 stdlib `net/http` 版 `RequestIDHandler`（`KIT-REQUESTID-STDLIB`），本仓未接线 |
+| `github.com/jackc/pgx/v5` | `v5.11.0`（2026-11-12 随 `X-DEP-BUMP-CONSUMERS` 由 MVS 从 `v5.7.3` 抬升；`tellurion-kit v0.5.0` 自身 pin `v5.11.0`） | 2026-10-23 施工 ③ 引入。`internal/pgstore`（`run` schema 的 PG 实现：`JobQueue` / `WorkerRegistry` + `Migrate`）与 `cmd/orchestrationservice` 使用；升档后与 kit / analytics 同档（core / data / strategy / agent / broker 仍 `v5.7.3`、risk `v5.7.5` 是 2026-10-26 的旧实测，跨仓抄 `pgxpool` / `pgtype` 用法前先核目标仓 `go.mod`）。**`internal/queue` 保持零第三方依赖**（port + DTO + 内存实现 + DDL 只用标准库），驱动只进 `pgstore` 一个包 |
+| Go 工具链（`go.mod` 的 `go` 指令） | `1.26.11`（2026-11-12 随 `X-DEP-BUMP-CONSUMERS` 从 `1.25.0` 升；下限由 `tellurion-kit v0.5.0` 的 `go 1.26.11` 决定） | 本机 Go 1.25.14 + `GOTOOLCHAIN=auto` 会自动切到缓存的 go1.26.11 构建；CI 的 `setup-go` 必须显式钉 `1.26.11` |
 
-> 今日 `go.mod` 的**直接依赖**是 `pgx v5.7.3`、`tellurion-kit v0.2.0` 与 `tellurion-contracts v0.9.0`（其余是它们的间接依赖）。
+> 今日 `go.mod` 的**直接依赖**是 `pgx v5.11.0`（MVS 抬升）、`tellurion-kit v0.5.0` 与 `tellurion-contracts v0.10.0`（其余是它们的间接依赖；`golang.org/x/net v0.60.0`、`golang.org/x/text v0.42.0`、`golang.org/x/crypto v0.57.0`、`golang.org/x/sync v0.23.0`、`golang.org/x/sys v0.48.0`）。
 
 > 跨仓依赖**只认版本号**（伪版本或 tag），不认源码路径。契约变更走 `tellurion-contracts` 的发布，不走"顺手改一下"。
 
