@@ -300,7 +300,7 @@ type authMode int
 const (
 	// authModeEnforced：有 JWT_SECRET，所有端点过 kit 闸（401 / 403）。
 	authModeEnforced authMode = iota
-	// authModeDegraded：无 secret、无显式开放声明。读端点公开，写端点 503。
+	// authModeDegraded：无 secret、无显式开放声明、回环绑定。读端点公开，写端点 503。
 	authModeDegraded
 	// authModeOpen：无 secret + 显式声明（loopback-published 或显式 allow-insecure），
 	// 任何绑定都放开写面（启动 WARN 点名「写面无鉴权」）。
@@ -309,9 +309,9 @@ const (
 
 // resolveAuthMode 按三态口径裁决启动模式；返回 error = 拒绝启动。
 //
-// 第 2 态不看 bindHost：容器里必然绑 0.0.0.0，回环约束在发布层（compose 的
-// `127.0.0.1:` 端口映射）。进程无法自证发布层，所以降级态以「写面恒 503」
-// 作为安全兜底——即使绑定被误暴露，也只泄露只读面。
+// 第 2 态（2026-11-12 二次修正）与兄弟仓统一：无 secret + 无显式声明时必须绑回环，
+// 非回环绑定拒绝启动。容器内要绑 0.0.0.0 又想无 secret 跑，只能显式声明（第 3 态），
+// 由启动 WARN 承担暴露后果。
 //
 // 第 3 态（2026-11-12 规则修正）不再因绑定地址拒绝启动：显式声明即允许任何绑定，
 // 启动 WARN 负责把「写面无鉴权」与「绑定地址」写清楚；非回环绑定额外点名「已对外暴露」。
@@ -326,6 +326,9 @@ func resolveAuthMode(secret string, allowInsecure, allowInsecureDeclared bool, h
 		}
 		if !allowInsecure {
 			return 0, errors.New("JWT secret missing and insecure mode disabled (AUTH_ALLOW_INSECURE=false) — refusing to start")
+		}
+		if !kithttp.IsLoopbackHost(host) {
+			return 0, fmt.Errorf("JWT secret missing and no explicit AUTH_INSECURE_EXPOSURE declaration; bind %q is not loopback — refusing to start", host)
 		}
 		return authModeDegraded, nil
 	case kithttp.InsecureExposureLoopbackPublished:

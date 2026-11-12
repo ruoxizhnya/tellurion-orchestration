@@ -271,7 +271,8 @@ verified-by: ORCH-RATELIMIT（2026-11-12：按调用方身份令牌桶 + 所有 
 - **wire 形状归 contracts（2026-11-09）**：claim / provenance / 父作业提交三类形状已统一为 `contracts/run`（`ClaimView` / `ProvenanceView` / `ParentSubmitRequest` 族），本仓与 core 不再各写一份；§1 的字段表仍是对外行为描述，形状的唯一 Go 实现在契约包。
 - **fail-closed 与三态（2026-11-12 收紧）**：受保护路由未装配 Authorizer → `503 auth_unavailable`；无凭证 → `401 unauthenticated`；非 service → `403 forbidden`。启动/运行分三态：
   1. **有 `JWT_SECRET`** → 全闸；
-  2. **无 secret + 无显式声明** → 进程能起，读端点公开，写端点（含 `POST /api/runs/jobs`、worker claim/lease/result、artifact 写）一律 `503 auth_unavailable`；
+  2. **无 secret + 无显式声明** → **回环绑定**：进程能起，读端点公开，写端点（含 `POST /api/runs/jobs`、worker claim/lease/result、artifact 写）一律 `503 auth_unavailable`；
+     **非回环绑定**：拒绝启动（与兄弟仓统一）。
   3. **无 secret + 显式声明**（`AUTH_INSECURE_EXPOSURE=loopback-published`，或显式 `AUTH_ALLOW_INSECURE=true` / `-allow-insecure=true`）→
      **任何绑定都放开**（写面无鉴权），启动 WARN 同时写出「写面无鉴权」与绑定地址；非回环绑定额外点名「已对外暴露」。
      未知声明值 / `AUTH_ALLOW_INSECURE=false` 且无 secret → 拒绝启动。

@@ -60,10 +60,11 @@ go test ./...
 
 > 今日 `go.mod` 的**直接依赖**是 `pgx v5.11.0`（MVS 抬升）、`tellurion-kit v0.5.0` 与 `tellurion-contracts v0.10.0`（其余是它们的间接依赖；`golang.org/x/net v0.60.0`、`golang.org/x/text v0.42.0`、`golang.org/x/crypto v0.57.0`、`golang.org/x/sync v0.23.0`、`golang.org/x/sys v0.48.0`）。
 >
-> **鉴权三态（2026-11-12 收紧，同日修正第 3 态）**：有 `JWT_SECRET` → 全闸；无 secret + 无显式声明 → 只读降级（读端点公开、写端点
-> `503 auth_unavailable`）；无 secret + **显式声明**（`AUTH_INSECURE_EXPOSURE=loopback-published`，或显式
-> `AUTH_ALLOW_INSECURE=true` / `-allow-insecure=true`）→ **任何绑定都允许放开**，启动 WARN 同时写出「写面无鉴权」与
-> 绑定地址，非回环绑定额外点名「已对外暴露」。`allowInsecure` 由 `AUTH_ALLOW_INSECURE` / `-allow-insecure` 配置，不再硬编码。
+> **鉴权三态（2026-11-12 收紧，同日修正第 3 态，随后统一第 2 态）**：有 `JWT_SECRET` → 全闸；无 secret + 无显式声明 →
+> **回环绑定**下只读降级（读端点公开、写端点 `503 auth_unavailable`），**非回环绑定拒绝启动**；无 secret + **显式声明**
+> （`AUTH_INSECURE_EXPOSURE=loopback-published`，或显式 `AUTH_ALLOW_INSECURE=true` / `-allow-insecure=true`）→
+> **任何绑定都允许放开**，启动 WARN 同时写出「写面无鉴权」与绑定地址，非回环绑定额外点名「已对外暴露」。
+> `allowInsecure` 由 `AUTH_ALLOW_INSECURE` / `-allow-insecure` 配置，不再硬编码。
 > 细节与锚点见 `docs/api-schema.md` §2/§8、`docs/runbook.md` 三态段。
 
 > 跨仓依赖**只认版本号**（伪版本或 tag），不认源码路径。契约变更走 `tellurion-contracts` 的发布，不走"顺手改一下"。

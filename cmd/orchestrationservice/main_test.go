@@ -394,17 +394,19 @@ func TestResolveAuthMode(t *testing.T) {
 		exposure      string
 		want          authMode
 		wantErr       bool
+		wantErrSub    string
 	}{
-		{"secret wins", "s3cret", true, false, "0.0.0.0", "", authModeEnforced, false},
-		{"secret wins even with insecure disabled", "s3cret", false, false, "127.0.0.1", "", authModeEnforced, false},
-		{"no secret + no declaration + loopback = degraded", "", true, false, "127.0.0.1", "", authModeDegraded, false},
-		{"no secret + no declaration = degraded regardless of bind", "", true, false, "0.0.0.0", "", authModeDegraded, false},
-		{"explicit exposure on loopback = open", "", true, false, "127.0.0.1", "loopback-published", authModeOpen, false},
-		{"explicit exposure on non-loopback = open", "", true, false, "0.0.0.0", "loopback-published", authModeOpen, false},
-		{"explicit allow-insecure on loopback = open", "", true, true, "127.0.0.1", "", authModeOpen, false},
-		{"explicit allow-insecure on non-loopback = open", "", true, true, "0.0.0.0", "", authModeOpen, false},
-		{"unknown declaration refuses", "", true, false, "127.0.0.1", "loopback", 0, true},
-		{"insecure disabled refuses without secret", "", false, false, "127.0.0.1", "", 0, true},
+		{"secret wins", "s3cret", true, false, "0.0.0.0", "", authModeEnforced, false, ""},
+		{"secret wins even with insecure disabled", "s3cret", false, false, "127.0.0.1", "", authModeEnforced, false, ""},
+		{"no secret + no declaration + loopback = degraded", "", true, false, "127.0.0.1", "", authModeDegraded, false, ""},
+		{"no secret + no declaration + non-loopback refuses", "", true, false, "0.0.0.0", "", 0, true, "not loopback"},
+		{"no secret + allowInsecure off + non-loopback refuses (rule call)", "", false, false, "0.0.0.0", "", 0, true, "AUTH_ALLOW_INSECURE=false"},
+		{"explicit exposure on loopback = open", "", true, false, "127.0.0.1", "loopback-published", authModeOpen, false, ""},
+		{"explicit exposure on non-loopback = open", "", true, false, "0.0.0.0", "loopback-published", authModeOpen, false, ""},
+		{"explicit allow-insecure on loopback = open", "", true, true, "127.0.0.1", "", authModeOpen, false, ""},
+		{"explicit allow-insecure on non-loopback = open", "", true, true, "0.0.0.0", "", authModeOpen, false, ""},
+		{"unknown declaration refuses", "", true, false, "127.0.0.1", "loopback", 0, true, "unknown AUTH_INSECURE_EXPOSURE"},
+		{"insecure disabled refuses without secret", "", false, false, "127.0.0.1", "", 0, true, "AUTH_ALLOW_INSECURE=false"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -412,6 +414,9 @@ func TestResolveAuthMode(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("resolveAuthMode = %v, want error (refuse to start)", got)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("拒绝理由不可读：%q 不含 %q", err.Error(), tc.wantErrSub)
 				}
 				return
 			}
