@@ -86,14 +86,14 @@ docker compose -f deploy/compose.yaml up -d
 | `-rate-limit-burst` | — | `200` | 令牌桶突发上限（`<=0` 关闭） |
 | `-startup-timeout` | — | `30s` | 连库 + 迁移的超时 |
 | `-jwt-secret` | `JWT_SECRET` / `AUTH_JWT_SECRET` | 空 | 有 secret ⇒ 全闸；空 ⇒ 第 2 态（读公开、写 503 `auth_unavailable`），进程照常起 |
-| `-insecure-exposure` | `AUTH_INSECURE_EXPOSURE` | 空 | 第 3 态的显式开放声明（只接受 `loopback-published`）；仅回环绑定可用，非回环绑定启动即拒 |
+| `-insecure-exposure` | `AUTH_INSECURE_EXPOSURE` | 空 | 第 3 态的显式开放声明（只接受 `loopback-published`）；有声明时**任何绑定**都放开，启动 WARN 点名写面无鉴权与绑定地址 |
 | `-allow-insecure` | `AUTH_ALLOW_INSECURE` | `true` | 是否允许无 secret 的降级/开放态；`false` = `JWT_SECRET` 必填，缺则拒绝启动 |
 
 鉴权三态（2026-11-12 收紧，六仓统一口径）：
 
 1. 有 `JWT_SECRET` → 全闸（401 / 403 不变）；
 2. 无 secret + 无显式声明 → **只读降级**：读端点公开，写端点（含 `POST /api/runs/jobs`、worker claim/lease/result、artifact 写）一律 `503 auth_unavailable`；
-3. 无 secret + `AUTH_INSECURE_EXPOSURE=loopback-published` + 回环绑定 → 写面显式开放（启动 WARN「写面无鉴权」）；非回环绑定 / 未知声明值直接拒绝启动。
+3. 无 secret + 显式声明（`AUTH_INSECURE_EXPOSURE=loopback-published`，或显式 `AUTH_ALLOW_INSECURE=true` / `-allow-insecure=true`）→ **任何绑定**都放开写面：启动 WARN 同时写出「写面无鉴权」与绑定地址，非回环绑定额外点名「已对外暴露」；未知声明值直接拒绝启动。
 
 启动日志会打印实际生效值：
 

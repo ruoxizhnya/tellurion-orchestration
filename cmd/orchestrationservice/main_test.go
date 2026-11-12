@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +20,9 @@ import (
 	"tellurion-orchestration/internal/queue"
 	"tellurion-orchestration/internal/testdb"
 )
+
+// state3RunSpec 是第 3 态写面用例的最小合法 run_spec。
+const state3RunSpec = `{"kernel":"default","symbol":"600000.SH"}`
 
 func TestResolveDSN(t *testing.T) {
 	t.Setenv("ORCHESTRATION_DSN", "")
@@ -377,28 +382,33 @@ func TestTwoProcessesShareTheQueueAgainstPG(t *testing.T) {
 }
 
 // TestResolveAuthMode 钉住启动期三态裁决与拒绝条件（六仓统一口径）。
+//
+// 2026-11-12 规则修正：第 3 态不再因绑定地址拒绝启动——有显式声明时任何绑定都放开。
 func TestResolveAuthMode(t *testing.T) {
 	cases := []struct {
 		name          string
 		secret        string
 		allowInsecure bool
+		declared      bool
 		host          string
 		exposure      string
 		want          authMode
 		wantErr       bool
 	}{
-		{"secret wins", "s3cret", true, "0.0.0.0", "", authModeEnforced, false},
-		{"secret wins even with insecure disabled", "s3cret", false, "127.0.0.1", "", authModeEnforced, false},
-		{"no secret + no declaration = degraded", "", true, "127.0.0.1", "", authModeDegraded, false},
-		{"no secret + container bind + no declaration = degraded", "", true, "0.0.0.0", "", authModeDegraded, false},
-		{"explicit declaration on loopback = open", "", true, "127.0.0.1", "loopback-published", authModeOpen, false},
-		{"explicit declaration on non-loopback refuses", "", true, "0.0.0.0", "loopback-published", 0, true},
-		{"unknown declaration refuses", "", true, "127.0.0.1", "loopback", 0, true},
-		{"insecure disabled refuses without secret", "", false, "127.0.0.1", "", 0, true},
+		{"secret wins", "s3cret", true, false, "0.0.0.0", "", authModeEnforced, false},
+		{"secret wins even with insecure disabled", "s3cret", false, false, "127.0.0.1", "", authModeEnforced, false},
+		{"no secret + no declaration + loopback = degraded", "", true, false, "127.0.0.1", "", authModeDegraded, false},
+		{"no secret + no declaration = degraded regardless of bind", "", true, false, "0.0.0.0", "", authModeDegraded, false},
+		{"explicit exposure on loopback = open", "", true, false, "127.0.0.1", "loopback-published", authModeOpen, false},
+		{"explicit exposure on non-loopback = open", "", true, false, "0.0.0.0", "loopback-published", authModeOpen, false},
+		{"explicit allow-insecure on loopback = open", "", true, true, "127.0.0.1", "", authModeOpen, false},
+		{"explicit allow-insecure on non-loopback = open", "", true, true, "0.0.0.0", "", authModeOpen, false},
+		{"unknown declaration refuses", "", true, false, "127.0.0.1", "loopback", 0, true},
+		{"insecure disabled refuses without secret", "", false, false, "127.0.0.1", "", 0, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveAuthMode(tc.secret, tc.allowInsecure, tc.host, tc.exposure)
+			got, err := resolveAuthMode(tc.secret, tc.allowInsecure, tc.declared, tc.host, tc.exposure)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("resolveAuthMode = %v, want error (refuse to start)", got)
@@ -412,5 +422,118 @@ func TestResolveAuthMode(t *testing.T) {
 				t.Fatalf("resolveAuthMode = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestInsecureDeclared 钉住「显式声明」的判定：出厂默认 true 不算声明，
+// 只有环境变量实际存在或 -allow-insecure 被显式给出才算。
+func TestInsecureDeclared(t *testing.T) {
+	t.Run("unset is not a declaration", func(t *testing.T) {
+		t.Setenv("AUTH_ALLOW_INSECURE", "")
+		if insecureDeclared(true) {
+			t.Fatal("AUTH_ALLOW_INSECURE 未设置时不应算显式声明")
+		}
+	})
+	t.Run("env true is a declaration", func(t *testing.T) {
+		t.Setenv("AUTH_ALLOW_INSECURE", "true")
+		if !insecureDeclared(true) {
+			t.Fatal("AUTH_ALLOW_INSECURE=true 应算显式声明")
+		}
+	})
+	t.Run("env false is not an open declaration", func(t *testing.T) {
+		t.Setenv("AUTH_ALLOW_INSECURE", "false")
+		if insecureDeclared(false) {
+			t.Fatal("AUTH_ALLOW_INSECURE=false 不应算开放声明")
+		}
+	})
+}
+
+// TestLogAuthPosture 钉住第 3 态 WARN 的两件事：必须同时写出「写面无鉴权」与
+// 绑定地址；非回环绑定必须点名「已对外暴露」。
+func TestLogAuthPosture(t *testing.T) {
+	cases := []struct {
+		name    string
+		mode    authMode
+		addr    string
+		want    []string
+		notWant []string
+	}{
+		{
+			name: "open on non-loopback",
+			mode: authModeOpen, addr: "0.0.0.0:8088",
+			want: []string{"写面无鉴权", "0.0.0.0:8088", "已对外暴露"},
+		},
+		{
+			name: "open on loopback",
+			mode: authModeOpen, addr: "127.0.0.1:8088",
+			want:    []string{"写面无鉴权", "127.0.0.1:8088"},
+			notWant: []string{"已对外暴露"},
+		},
+		{
+			name: "degraded",
+			mode: authModeDegraded, addr: "127.0.0.1:8088",
+			want:    []string{"503 auth_unavailable", "127.0.0.1:8088"},
+			notWant: []string{"写面无鉴权", "已对外暴露"},
+		},
+		{
+			name: "enforced prints nothing",
+			mode: authModeEnforced, addr: "0.0.0.0:8088",
+			notWant: []string{"WARNING"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := log.Writer()
+			log.SetOutput(&buf)
+			defer log.SetOutput(prev)
+
+			logAuthPosture(tc.mode, tc.addr)
+			out := buf.String()
+			for _, w := range tc.want {
+				if !strings.Contains(out, w) {
+					t.Fatalf("启动 WARN 缺少 %q；实际输出: %s", w, out)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(out, w) {
+					t.Fatalf("启动 WARN 不应包含 %q；实际输出: %s", w, out)
+				}
+			}
+		})
+	}
+}
+
+// TestAuthState3NonLoopbackServesWrites 是 2026-11-12 规则修正的锚点：
+// 无 secret + 显式声明 + **非回环绑定** → 进程能起（resolveAuthMode 不报错），
+// 且按 main 的装配方式（open → NewOpenAuthorizer）写面真放行（202 POST /api/runs/jobs）。
+func TestAuthState3NonLoopbackServesWrites(t *testing.T) {
+	mode, err := resolveAuthMode("", true, false, "0.0.0.0", "loopback-published")
+	if err != nil {
+		t.Fatalf("非回环 + 显式声明应允许启动，却返回错误: %v", err)
+	}
+	if mode != authModeOpen {
+		t.Fatalf("mode = %v, want authModeOpen", mode)
+	}
+
+	// 显式 allow-insecure 声明同样让非回环绑定落地（不用 AUTH_INSECURE_EXPOSURE）。
+	mode, err = resolveAuthMode("", true, true, "0.0.0.0", "")
+	if err != nil {
+		t.Fatalf("非回环 + 显式 allow-insecure 应允许启动，却返回错误: %v", err)
+	}
+	if mode != authModeOpen {
+		t.Fatalf("mode = %v, want authModeOpen", mode)
+	}
+
+	jobs := queue.NewMemory(queue.MemoryOptions{Now: func() time.Time {
+		return time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	}})
+	srv := httpapi.New(jobs, httpapi.WithAuthorizer(httpapi.NewOpenAuthorizer()))
+	body := `{"idempotency_key":"state3-nonloopback","run_spec":` + state3RunSpec + `}`
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/jobs", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("第 3 态非回环写面 = %d, want 202: %s", rec.Code, rec.Body.String())
 	}
 }

@@ -22,8 +22,9 @@ services:
       # 要写必须由部署方注入 JWT_SECRET，并给调用方（core worker / analysis）配套 token。
       # 签发/轮换见 tellurion:docs/SPEC.md 的「服务间凭证」节。
       JWT_SECRET: ${JWT_SECRET:-}
-      # 显式开放仅限回环绑定（第 3 态）：容器内绑 0.0.0.0 时填 loopback-published
-      # 会被启动闸拒绝，默认留空即落到第 2 态。
+      # 显式开放声明（第 3 态）：填 loopback-published 后**任何绑定**都放开写面，
+      # 启动 WARN 会点名写面无鉴权与绑定地址（非回环附加「已对外暴露」）。
+      # 默认留空 = 不声明；要开放必须由部署者显式给出并承担 WARN 的后果。
       AUTH_INSECURE_EXPOSURE: ${AUTH_INSECURE_EXPOSURE:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"

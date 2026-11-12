@@ -81,35 +81,32 @@ func run() error {
 		jwtSecret   = flag.String("jwt-secret", envFirst("JWT_SECRET", "AUTH_JWT_SECRET"),
 			"JWT secret shared with core（空 = 回环开放访问；非回环无 secret 拒绝启动）")
 		exposure = flag.String("insecure-exposure", os.Getenv("AUTH_INSECURE_EXPOSURE"),
-			"非回环绑定时的显式开放声明（只接受 loopback-published）")
+			"显式开放声明（只接受 loopback-published）；有声明时任何绑定都放开写面")
 		allowInsecure = flag.Bool("allow-insecure", envBool("AUTH_ALLOW_INSECURE", true),
 			"允许无 secret 的降级/开放态（false = JWT_SECRET 必填，缺则拒绝启动）")
 	)
 	flag.Parse()
+
+	// 「显式声明」= 部署者主动写下 AUTH_INSECURE_EXPOSURE=loopback-published，或显式把
+	// AUTH_ALLOW_INSECURE / -allow-insecure 置为 true。默认值（未设置）**不算**声明。
+	allowInsecureDeclared := insecureDeclared(*allowInsecure)
 
 	dsn, err := resolveDSN(*dsnFlag)
 	if err != nil {
 		return err
 	}
 
-	// 三态启动裁决（2026-11-12 收紧）：
+	// 三态启动裁决（2026-11-12 收紧，同日修正第 3 态）：
 	//   1. 有 secret                → 全闸；
 	//   2. 无 secret + 无显式声明    → 只读降级：读端点公开，写端点 503 auth_unavailable；
-	//   3. 无 secret + AUTH_INSECURE_EXPOSURE=loopback-published + 回环绑定
-	//      → 显式开放（启动 WARN 点名「写面无鉴权」）；非回环绑定直接拒绝启动。
+	//   3. 无 secret + 显式声明      → 任何绑定都放开（写面无鉴权），启动 WARN 同时写出
+	//      「写面无鉴权」与绑定地址；非回环绑定额外点名「已对外暴露」。
 	// allowInsecure 来自配置（AUTH_ALLOW_INSECURE / -allow-insecure），不再是代码里的常量。
-	mode, err := resolveAuthMode(*jwtSecret, *allowInsecure, bindHost(*addr), *exposure)
+	mode, err := resolveAuthMode(*jwtSecret, *allowInsecure, allowInsecureDeclared, bindHost(*addr), *exposure)
 	if err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
-	switch mode {
-	case authModeOpen:
-		log.Printf("orchestrationservice: WARNING authentication DISABLED (AUTH_INSECURE_EXPOSURE=loopback-published): " +
-			"write endpoints have NO authentication — the publish layer MUST stay on loopback")
-	case authModeDegraded:
-		log.Printf("orchestrationservice: WARNING authentication is not configured (no JWT_SECRET): " +
-			"read endpoints are public, write endpoints answer 503 auth_unavailable")
-	}
+	logAuthPosture(mode, *addr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -280,6 +277,23 @@ func bindHost(addr string) string {
 	return host
 }
 
+// insecureDeclared 判断部署者是否**主动**声明了放开（第 3 态）。
+//
+// AUTH_ALLOW_INSECURE 出厂值就是 true（envBool 默认），所以「没设置」不能算声明；
+// 只有环境变量实际存在且为 true，或命令行显式给出 -allow-insecure=true 才算。
+func insecureDeclared(allowInsecure bool) bool {
+	if strings.TrimSpace(os.Getenv("AUTH_ALLOW_INSECURE")) != "" {
+		return allowInsecure
+	}
+	declared := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "allow-insecure" {
+			declared = allowInsecure
+		}
+	})
+	return declared
+}
+
 // authMode 是本进程的鉴权三态（六仓统一口径）。
 type authMode int
 
@@ -288,7 +302,8 @@ const (
 	authModeEnforced authMode = iota
 	// authModeDegraded：无 secret、无显式开放声明。读端点公开，写端点 503。
 	authModeDegraded
-	// authModeOpen：无 secret + 显式 loopback-published + 回环绑定，写面全开放。
+	// authModeOpen：无 secret + 显式声明（loopback-published 或显式 allow-insecure），
+	// 任何绑定都放开写面（启动 WARN 点名「写面无鉴权」）。
 	authModeOpen
 )
 
@@ -297,25 +312,43 @@ const (
 // 第 2 态不看 bindHost：容器里必然绑 0.0.0.0，回环约束在发布层（compose 的
 // `127.0.0.1:` 端口映射）。进程无法自证发布层，所以降级态以「写面恒 503」
 // 作为安全兜底——即使绑定被误暴露，也只泄露只读面。
-func resolveAuthMode(secret string, allowInsecure bool, host, exposure string) (authMode, error) {
+//
+// 第 3 态（2026-11-12 规则修正）不再因绑定地址拒绝启动：显式声明即允许任何绑定，
+// 启动 WARN 负责把「写面无鉴权」与「绑定地址」写清楚；非回环绑定额外点名「已对外暴露」。
+func resolveAuthMode(secret string, allowInsecure, allowInsecureDeclared bool, host, exposure string) (authMode, error) {
 	if strings.TrimSpace(secret) != "" {
 		return authModeEnforced, nil
 	}
-	if !allowInsecure {
-		return 0, errors.New("JWT secret missing and insecure mode disabled (AUTH_ALLOW_INSECURE=false) — refusing to start")
-	}
 	switch strings.TrimSpace(exposure) {
 	case "":
+		if allowInsecureDeclared {
+			return authModeOpen, nil
+		}
+		if !allowInsecure {
+			return 0, errors.New("JWT secret missing and insecure mode disabled (AUTH_ALLOW_INSECURE=false) — refusing to start")
+		}
 		return authModeDegraded, nil
 	case kithttp.InsecureExposureLoopbackPublished:
-		if !kithttp.IsLoopbackHost(host) {
-			return 0, fmt.Errorf("AUTH_INSECURE_EXPOSURE=%s requires a loopback bind, got %q — refusing to start",
-				kithttp.InsecureExposureLoopbackPublished, host)
-		}
 		return authModeOpen, nil
 	default:
 		return 0, fmt.Errorf("unknown AUTH_INSECURE_EXPOSURE %q (only %q is accepted) — refusing to start",
 			exposure, kithttp.InsecureExposureLoopbackPublished)
+	}
+}
+
+// logAuthPosture 打印三态启动 WARN。第 3 态必须同时写清「写面无鉴权」与绑定地址；
+// 非回环绑定额外点名「已对外暴露」。
+func logAuthPosture(mode authMode, addr string) {
+	host := bindHost(addr)
+	switch mode {
+	case authModeOpen:
+		if kithttp.IsLoopbackHost(host) {
+			log.Printf("orchestrationservice: WARNING 写面无鉴权（authentication disabled）：绑定地址 %s（回环）；写端点不再校验 token", addr)
+			return
+		}
+		log.Printf("orchestrationservice: WARNING 写面无鉴权（authentication disabled）：绑定地址 %s，已对外暴露；发布层必须回环或前置鉴权网关", addr)
+	case authModeDegraded:
+		log.Printf("orchestrationservice: WARNING authentication is not configured (no JWT_SECRET)：读端点公开、写端点 503 auth_unavailable；绑定地址 %s", addr)
 	}
 }
 

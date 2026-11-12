@@ -272,6 +272,9 @@ verified-by: ORCH-RATELIMIT（2026-11-12：按调用方身份令牌桶 + 所有 
 - **fail-closed 与三态（2026-11-12 收紧）**：受保护路由未装配 Authorizer → `503 auth_unavailable`；无凭证 → `401 unauthenticated`；非 service → `403 forbidden`。启动/运行分三态：
   1. **有 `JWT_SECRET`** → 全闸；
   2. **无 secret + 无显式声明** → 进程能起，读端点公开，写端点（含 `POST /api/runs/jobs`、worker claim/lease/result、artifact 写）一律 `503 auth_unavailable`；
-  3. **无 secret + `AUTH_INSECURE_EXPOSURE=loopback-published` + 回环绑定** → 写面显式开放（启动 WARN「写面无鉴权」），非回环绑定启动即拒；`AUTH_ALLOW_INSECURE=false` 时无 secret 一律拒绝启动。
-  锚点 = `TestAuthPostureThreeStates`（三态状态码 + code）、`TestResolveAuthMode`（启动裁决与拒绝条件）。
+  3. **无 secret + 显式声明**（`AUTH_INSECURE_EXPOSURE=loopback-published`，或显式 `AUTH_ALLOW_INSECURE=true` / `-allow-insecure=true`）→
+     **任何绑定都放开**（写面无鉴权），启动 WARN 同时写出「写面无鉴权」与绑定地址；非回环绑定额外点名「已对外暴露」。
+     未知声明值 / `AUTH_ALLOW_INSECURE=false` 且无 secret → 拒绝启动。
+  锚点 = `TestAuthPostureThreeStates`（三态状态码 + code）、`TestResolveAuthMode`（启动裁决与拒绝条件）、
+  `TestLogAuthPosture`（第 3 态 WARN 两件事齐）、`TestAuthState3NonLoopbackServesWrites`（非回环 + 显式声明 → 能起且写面 202）。
 - **service token 的签发 / 分发不在本仓**：归 `tellurion:QT-77`；本仓只校验。
