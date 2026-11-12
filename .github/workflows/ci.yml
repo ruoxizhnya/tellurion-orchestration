@@ -35,6 +35,13 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # X-DEP-BUMP-CONSUMERS：依赖漏洞门（2026-11-12 回补）。
+      # 首轮只升了 pin、没加门——依赖升级与漏洞检测拆开，pin 里带已知漏洞也能全绿。
+      # govulncheck 按“符号级可达性”判定，只对真正被调用到的漏洞报红。
+      # 破坏验证：把 kit / pgx 降回旧 pin ⇒ 本步以 GO-2026-5004 等 ID 报红；还原 ⇒ EXIT=0。
+      - name: Govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       - name: Test
         run: go test ./... -count=1
 
