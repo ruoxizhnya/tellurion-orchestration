@@ -12,6 +12,27 @@ jobs:
   go:
     name: Build & Test
     runs-on: ubuntu-latest
+    # ORCH-CI-GATES：真库腿。库侧用例原本按设计 skip（见 AGENTS.md §2），
+    # 这里起隔离 PG 并注入 DSN，让它们真跑。临时库，绝不指向部署库。
+    #
+    # 迁移入口：本仓无 migrations 目录，DDL 由 internal/pgstore 内嵌，
+    # 真库用例在打开 store 时执行；因此这里不另设迁移步骤（手写 SQL 会与内嵌 DDL 双写漂移）。
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tellurion_orchestration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tellurion_orchestration_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ORCHESTRATION_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5432/tellurion_orchestration_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
@@ -42,8 +63,19 @@ jobs:
       - name: Govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
-      - name: Test
-        run: go test ./... -count=1
+      # 覆盖率门（ORCH-CI-GATES）：基线 = 2026-11-13 在隔离 PG 16 上实跑
+      # `go test ./... -count=1 -coverprofile=coverage.out` 的 total 56.4%；
+      # 取整 56 - 5 = 51%（口径见 AGENTS.md §2）。低于门 exit 1。
+      - name: Test（真库腿 + 覆盖率门）
+        run: |
+          go test ./... -count=1 -coverprofile=coverage.out
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/,"",$3); print $3}')"
+          if [ -z "$total" ]; then
+            echo "覆盖率门：未能从 coverage.out 解析 total"
+            exit 1
+          fi
+          echo "total coverage: ${total}%（门：51%）"
+          awk -v t="$total" 'BEGIN { if (t + 0 < 51.0) { printf("覆盖率门红：%.1f%% < 51%%（基线 56.4% 取整 56 - 5）\n", t); exit 1 } }'
 
       - name: Test（-race，数据竞争即红）
         run: go test -race ./... -count=1

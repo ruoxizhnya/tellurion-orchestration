@@ -28,7 +28,9 @@ go test ./...
     —— 它跑的是与内存实现**同一套**语义套件（`internal/qtest`），外加 SKIP LOCKED / 唯一索引 / JSONB 三条 PG 专属腿。
 - 若某一步需要别的仓的源码目录才过，那是**边界画错了**——停下来修边界，**不要**加 `replace ../xxx` 绕过。
 - 本机同时改多个仓时可用 `go.work` 联调，但**它不入库**（`.gitignore` 已挡）。
-- CI（`.github/workflows/ci.yml`，单 job `go`）：`gofmt` → `go build` → `go vet` → `govulncheck@latest ./...`（依赖漏洞门，X-DEP-BUMP-CONSUMERS）→ `go test ./... -count=1` → `go test -race ./... -count=1`（竞态门，X-CI-RACE-STATICCHECK）→ `staticcheck@latest ./...`（`go install` 后跑，未钉版本）。
+- CI（`.github/workflows/ci.yml`，单 job `go`）：`gofmt` → `go build` → `go vet` → `govulncheck@latest ./...`（依赖漏洞门，X-DEP-BUMP-CONSUMERS）→ `go test ./... -count=1 -coverprofile=coverage.out` + **覆盖率门**（ORCH-CI-GATES）→ `go test -race ./... -count=1`（竞态门，X-CI-RACE-STATICCHECK）→ `staticcheck@latest ./...`（`go install` 后跑，未钉版本）。
+- **CI 的 DB 腿（ORCH-CI-GATES，2026-11-13）**：Test job 起 `postgres:16` service（`pg_isready -U postgres -d tellurion_orchestration_test`）+ job 级注入 `ORCHESTRATION_TEST_DSN`（CI 内 `127.0.0.1:5432/tellurion_orchestration_test`，**绝不指向部署库**）。本仓无 migrations 目录，DDL 由 `internal/pgstore` 内嵌、真库用例打开 store 时执行，因此 CI 不另设迁移步骤（手写 SQL 会与内嵌 DDL 双写漂移）。效果：库侧 **15 条**用例由 SKIP 转 PASS（带 DSN 168 PASS / 0 SKIP，无 DSN 153 PASS / 15 SKIP）；**本地不设 DSN 仍按设计 skip**，不是假绿。
+- **覆盖率门（ORCH-CI-GATES）**：阈值 **51%**（语句加权，`go tool cover -func` 的 `total`），来源 = 2026-11-13 在隔离 PG 16 上真跑全套件实测 **56.4%**，取整 56 减 5（跨仓口径见 `tellurion:docs/TASKS.md` → `X-COVERAGE-FLOOR`）。低于阈值 `exit 1`，解析不出 total 也 `exit 1`。**这 5 点余量是防累计漂移的缓冲**：本仓 3,330 条语句，删单个可编译测试文件最多掉 3.4 点（`internal/httpapi/workers_test.go` ⇒ 53.0%）；漏配 DSN 时实测 **43.0% < 51% 直接红**（这才是这条门要拦的事故）。
 
 ## 3. 边界（硬约束）
 

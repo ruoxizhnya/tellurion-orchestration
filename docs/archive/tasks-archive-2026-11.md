@@ -16,6 +16,7 @@
 | SVC-ORCH-G4 | 服务就绪门 G4：租约/回收的失败语义 · worker 可观测 · runbook（ADR-036） | 2026-11-07 | —（原文未记） | [原文](#SVC-ORCH-G4) |
 | ORCH-RATELIMIT | 编排服务无身份限流，429 不带 Retry-After | 2026-11-12 | —（见 `git log --grep ORCH-RATELIMIT`） | [原文](#ORCH-RATELIMIT) |
 | X-DEP-BUMP-CONSUMERS | 消费方依赖抬升（kit v0.5.0 / contracts v0.10.0 / go 1.26.11）+ govulncheck 门 | 2026-11-12 | `d093481`（pin）、`4a7112c`（回补门） | [施工记录](#X-DEP-BUMP-CONSUMERS) |
+| ORCH-CI-GATES | CI 起 PG 16 + 覆盖率门（库侧 15 条 SKIP→PASS；实测 56.4% → 门 51%） | 2026-11-13 | 见本条 | [原文与施工记录](#ORCH-CI-GATES) |
 
 ---
 
@@ -393,3 +394,21 @@
 > - **破坏验证（真做真还原）**：`go mod edit` 把 kit 降回 `v0.2.0`、pgx 降回 `v5.7.3` 并 `go mod tidy` ⇒ `govulncheck` 报 `GO-2026-5004`、EXIT=1；从备份逐字节还原 `go.mod` / `go.sum`（SHA256 与降版前一致：`go.mod 16C2C236…70E2`、`go.sum 64BF5962…63F0`）后复跑 EXIT=0。
 > - **门禁**：`gofmt -l .` 无输出；`go build/vet/test ./... -count=1` 全绿。
 > - **边界**：只动本仓 CI 与台账；其余消费仓由各自伞腿承担。
+
+---
+
+## 2026-11-13 收口
+
+<a id="ORCH-CI-GATES"></a>
+### ORCH-CI-GATES · CI 起 PG 并设覆盖率门（4 条 DB 用例不再 skip）[P2] ✅ 2026-11-13
+
+> 档 4（测试）· 来源：03-testing P1-3 / P2-2 · 顺序 4-8 · 依赖：core 伞 `X-COVERAGE-FLOOR`
+
+- **① 目标**：CI 真跑 DB 腿（4 条按设计 skip 的用例），并补覆盖率门。
+- **② 上下文**：Test job 无 postgres service / 无 DSN，库侧用例长期 skip；DSN 变量名与迁移入口施工时以测试代码为准。
+- **③ 要求**：① 加 `postgres:16` service + healthcheck；② 注入 DSN；③ Test 前应用本仓迁移；④ 本地无 DSN 仍 skip；⑤ 覆盖率门 = 实测 - 5。
+- **④ 约束与非目标**：不改业务代码；不把 skip 改成假通过；不顺手改编排语义。
+- **⑤ 验收**：CI 中 DB 用例 PASS（数量 > 0）；删测试 ⇒ 门红；本地无 DSN ⇒ skip 且原因可读。
+- **⑥ 边界**：本仓 CI + 测试夹具。
+
+**施工记录（2026-11-13）**：DSN 变量按代码取 `ORCHESTRATION_TEST_DSN`；迁移入口 = `internal/pgstore` 内嵌 DDL（真库用例打开 store 时执行），CI 不另设迁移步。CI 起 `postgres:16` service（`pg_isready -U postgres -d tellurion_orchestration_test`）+ job 级注入 DSN；`Test` 步改带 `-coverprofile` 并加门（解析不到 total 也 `exit 1`）；`-race` / `staticcheck` / `govulncheck` 步不变。**实测（隔离 PG16 容器 55432 / 库 `tellurion_orchestration_test`，未碰部署库）**：带 DSN `168 PASS / 0 SKIP`、覆盖率 `56.4%`；无 DSN `153 PASS / 15 SKIP`。单内「4 条」是旧口径，**实测库侧 15 条**由 SKIP 转 PASS，已按实测改正。门 = 56 取整 - 5 = **51%**。破坏/负向验证（真做真还原）：① 删 `internal/queue/memory_test.go` ⇒ 测试 `EXIT=1` 红（同包构造器缺失/断言失败），`git checkout` 逐字节还原后复绿、`git diff` 为空；② 可编译单文件最大影响 3.4 点（删 `internal/httpapi/workers_test.go` ⇒ 53.0%，仍在门内），故 5 点余量按「防累计漂移」定位；③ 漏配 DSN ⇒ 43.0% < 51% 门红（门真正要拦的事故）。
